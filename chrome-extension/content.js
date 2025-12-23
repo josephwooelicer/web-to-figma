@@ -178,6 +178,11 @@ function isTextContainer(node) {
     // If it has a background or border, we want to capture it as a Frame with children, not just a flattened TEXT node
     if (hasVisibleBackground || hasVisibleBorder) return false;
 
+    // Flex and Grid containers should always be Frames to preserve spacing/layout
+    if (style.display === 'flex' || style.display === 'inline-flex' || style.display === 'grid' || style.display === 'inline-grid') {
+        return false;
+    }
+
     for (const child of node.childNodes) {
         if (child.nodeType === Node.TEXT_NODE) continue;
         if (child.nodeType === Node.ELEMENT_NODE && INLINE_TAGS.includes(child.tagName)) {
@@ -365,6 +370,10 @@ function getStyles(element) {
         paddingRight: parseFloat(style.paddingRight) || 0,
         paddingBottom: parseFloat(style.paddingBottom) || 0,
         paddingLeft: parseFloat(style.paddingLeft) || 0,
+        marginTop: parseFloat(style.marginTop) || 0,
+        marginRight: parseFloat(style.marginRight) || 0,
+        marginBottom: parseFloat(style.marginBottom) || 0,
+        marginLeft: parseFloat(style.marginLeft) || 0,
         opacity: parseFloat(style.opacity) || 1,
         overflow: style.overflow,
         boxShadow: style.boxShadow,
@@ -384,6 +393,8 @@ function getStyles(element) {
         alignItems: style.alignItems,
         justifyContent: style.justifyContent,
         verticalAlign: style.verticalAlign,
+        columnGap: parseFloat(style.columnGap) || 0,
+        rowGap: parseFloat(style.rowGap) || 0,
     };
 }
 
