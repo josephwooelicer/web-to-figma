@@ -41,9 +41,13 @@ function getStyles(element) {
 
 /**
  * Traverses DOM and returns Figma-compatible JSON
+ * @param {Node} node
+ * @param {number} depth
+ * @param {Set<Node>} skipNodes Nodes to skip during traversal (already captured in other groups)
  */
-function captureNode(node, depth = 0) {
+function captureNode(node, depth = 0, skipNodes = new Set()) {
     if (depth > 50) return null;
+    if (skipNodes.has(node)) return null;
 
     if (node.nodeType === Node.TEXT_NODE) {
         const text = node.textContent.trim();
@@ -140,7 +144,7 @@ function captureNode(node, depth = 0) {
     let childCount = 0;
     for (const child of node.childNodes) {
         if (childCount > 500) break;
-        const childLayer = captureNode(child, depth + 1);
+        const childLayer = captureNode(child, depth + 1, skipNodes);
         if (childLayer) {
             layer.children.push(childLayer);
             childCount++;
@@ -150,10 +154,85 @@ function captureNode(node, depth = 0) {
     return layer;
 }
 
+/**
+ * Finds all elements with a specific position that don't have an ancestor with that same position
+ */
+function findRootPositionedElements(rootNode, positions) {
+    const roots = [];
+    const walker = document.createTreeWalker(rootNode, NodeFilter.SHOW_ELEMENT, {
+        acceptNode(node) {
+            const style = window.getComputedStyle(node);
+            if (positions.includes(style.position)) {
+                return NodeFilter.FILTER_ACCEPT;
+            }
+            return NodeFilter.FILTER_SKIP;
+        }
+    });
+
+    let node;
+    while (node = walker.nextNode()) {
+        // Check if any ancestor is already in roots
+        let hasAncestorInRoots = false;
+        let parent = node.parentElement;
+        while (parent && parent !== rootNode) {
+            const parentStyle = window.getComputedStyle(parent);
+            if (positions.includes(parentStyle.position)) {
+                hasAncestorInRoots = true;
+                break;
+            }
+            parent = parent.parentElement;
+        }
+
+        if (!hasAncestorInRoots) {
+            roots.push(node);
+        }
+    }
+    return roots;
+}
+
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     if (request.type === 'CAPTURE') {
         try {
-            const root = captureNode(document.body);
+            const fixedRoots = findRootPositionedElements(document.body, ['fixed']);
+            const stickyRoots = findRootPositionedElements(document.body, ['sticky']);
+
+            const skipNodes = new Set([...fixedRoots, ...stickyRoots]);
+
+            const fixedGroup = {
+                name: "Fixed Elements",
+                type: "FRAME",
+                x: 0,
+                y: 0,
+                width: document.documentElement.scrollWidth,
+                height: document.documentElement.scrollHeight,
+                children: fixedRoots.map(node => captureNode(node)).filter(Boolean)
+            };
+
+            const stickyGroup = {
+                name: "Sticky Elements",
+                type: "FRAME",
+                x: 0,
+                y: 0,
+                width: document.documentElement.scrollWidth,
+                height: document.documentElement.scrollHeight,
+                children: stickyRoots.map(node => captureNode(node)).filter(Boolean)
+            };
+
+            const otherGroup = captureNode(document.body, 0, skipNodes);
+            if (otherGroup) {
+                otherGroup.name = "Other Elements";
+            }
+
+            const root = {
+                name: "Page",
+                type: "FRAME",
+                x: 0,
+                y: 0,
+                width: document.documentElement.scrollWidth,
+                height: document.documentElement.scrollHeight,
+                children: [otherGroup, stickyGroup, fixedGroup].filter(Boolean)
+            };
+
             sendResponse({ data: root });
         } catch (e) {
             console.error(e);
@@ -162,3 +241,4 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     }
     return true;
 });
+
