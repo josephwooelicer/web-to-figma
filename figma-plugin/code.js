@@ -1,25 +1,113 @@
 figma.showUI(__html__, { width: 300, height: 400 });
 
+function normalizeLink(link) {
+    if (!link) return null;
+    if (link.type === 'URL' && link.value) return link;
+    if (link.url) return { type: 'URL', value: link.url };
+    return null;
+}
+
+async function safeLoadFont(fontName) {
+    try {
+        await figma.loadFontAsync(fontName);
+        return fontName;
+    } catch (e) {
+        // Fallback 1: Try family + Regular
+        if (fontName.style !== "Regular") {
+            try {
+                const fallback = { family: fontName.family, style: "Regular" };
+                await figma.loadFontAsync(fallback);
+                return fallback;
+            } catch (e2) { }
+        }
+        // Fallback 2: Inter Regular
+        await figma.loadFontAsync({ family: "Inter", style: "Regular" });
+        return { family: "Inter", style: "Regular" };
+    }
+}
+
 async function createLayer(data, parent, parentGlobalX = 0, parentGlobalY = 0) {
     let layer;
 
     if (data.type === 'TEXT') {
         const family = data.fontFamily || "Inter";
-        const style = data.fontWeight && data.fontWeight.toString().includes('bold') ? "Bold" : "Regular";
+        let style = "Regular";
+        const isBold = data.fontWeight && data.fontWeight.toString().includes('bold');
+        const isItalic = data.fontStyle === 'italic';
 
-        try {
-            await figma.loadFontAsync({ family, style });
-            layer = figma.createText();
-            layer.fontName = { family, style };
-        } catch (e) {
-            console.warn(`Could not load font ${family} ${style}, falling back to Inter Regular`);
-            await figma.loadFontAsync({ family: "Inter", style: "Regular" });
-            layer = figma.createText();
-            layer.fontName = { family: "Inter", style: "Regular" };
+        if (isBold && isItalic) style = "Bold Italic";
+        else if (isBold) style = "Bold";
+        else if (isItalic) style = "Italic";
+
+        const loadedFont = await safeLoadFont({ family, style });
+        layer = figma.createText();
+        layer.fontName = loadedFont;
+
+        if (data.textIndent) {
+            layer.paragraphIndent = data.textIndent;
         }
 
         layer.characters = data.characters || "";
-        if (data.fontSize) layer.fontSize = data.fontSize;
+
+        if (data.styleRanges && data.styleRanges.length > 0) {
+            // Pre-load all fonts needed for ranges
+            const fonts = new Set();
+            for (const range of data.styleRanges) {
+                const rIsBold = range.fontWeight === 'bold';
+                const rIsItalic = range.fontStyle === 'italic';
+                let rStyle = "Regular";
+                if (rIsBold && rIsItalic) rStyle = "Bold Italic";
+                else if (rIsBold) rStyle = "Bold";
+                else if (rIsItalic) rStyle = "Italic";
+
+                const fontToLoad = { family: range.fontFamily || "Inter", style: rStyle };
+                const loaded = await safeLoadFont(fontToLoad);
+                range.actualFontName = loaded; // Store the successfully loaded font
+            }
+
+            // Apply ranges
+            for (const range of data.styleRanges) {
+                const start = range.start;
+                const end = Math.min(range.end, layer.characters.length);
+                if (start >= end) continue;
+
+                if (range.fontSize) layer.setRangeFontSize(start, end, range.fontSize);
+
+                if (range.actualFontName) {
+                    layer.setRangeFontName(start, end, range.actualFontName);
+                }
+
+                if (range.fill) layer.setRangeFills(start, end, [range.fill]);
+                if (range.textCase) layer.setRangeTextCase(start, end, range.textCase);
+                if (range.textDecoration) layer.setRangeTextDecoration(start, end, range.textDecoration);
+                if (range.lineHeight) {
+                    layer.setRangeLineHeight(start, end, { value: range.lineHeight, unit: 'PIXELS' });
+                }
+                if (range.letterSpacing) {
+                    layer.setRangeLetterSpacing(start, end, { value: range.letterSpacing, unit: 'PIXELS' });
+                }
+                if (range.link) {
+                    const normalized = normalizeLink(range.link);
+                    if (normalized) layer.setRangeHyperlink(start, end, normalized);
+                }
+            }
+        } else {
+            if (data.fontSize) layer.fontSize = data.fontSize;
+            if (data.textCase) layer.textCase = data.textCase;
+            if (data.textDecoration) layer.textDecoration = data.textDecoration;
+            if (data.lineHeight) {
+                layer.lineHeight = { value: data.lineHeight, unit: 'PIXELS' };
+            }
+            if (data.letterSpacing) {
+                layer.letterSpacing = { value: data.letterSpacing, unit: 'PIXELS' };
+            }
+            if (data.link) {
+                const normalized = normalizeLink(data.link);
+                if (normalized) layer.setRangeHyperlink(0, layer.characters.length, normalized);
+            }
+        }
+
+        if (data.textAlignHorizontal) layer.textAlignHorizontal = data.textAlignHorizontal;
     } else if (data.type === 'SVG') {
         try {
             layer = figma.createNodeFromSvg(data.svgContent);
@@ -35,6 +123,9 @@ async function createLayer(data, parent, parentGlobalX = 0, parentGlobalY = 0) {
         // we'll just color it gray for now or try to use figma.createImageAsync
     } else {
         layer = figma.createFrame();
+        if (data.clipsContent !== undefined) {
+            layer.clipsContent = data.clipsContent;
+        }
     }
 
     layer.name = data.name || "Layer";
@@ -58,6 +149,11 @@ async function createLayer(data, parent, parentGlobalX = 0, parentGlobalY = 0) {
         layer.opacity = data.opacity;
     }
 
+    // Effects (Shadows, Blurs)
+    if (data.effects && data.effects.length > 0) {
+        layer.effects = data.effects;
+    }
+
     // Fills
     if (data.fills && data.fills.length > 0) {
         layer.fills = data.fills.map(f => ({
@@ -76,7 +172,17 @@ async function createLayer(data, parent, parentGlobalX = 0, parentGlobalY = 0) {
             color: s.color,
             opacity: s.opacity !== undefined ? s.opacity : 1
         }));
-        layer.strokeWeight = data.strokeWeight || 1;
+
+        layer.strokeAlign = 'INSIDE';
+
+        if (data.strokeTopWeight !== undefined) {
+            layer.strokeTopWeight = data.strokeTopWeight;
+            layer.strokeRightWeight = data.strokeRightWeight;
+            layer.strokeBottomWeight = data.strokeBottomWeight;
+            layer.strokeLeftWeight = data.strokeLeftWeight;
+        } else {
+            layer.strokeWeight = data.strokeWeight || 1;
+        }
     }
 
     if (parent) {

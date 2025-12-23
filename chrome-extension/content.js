@@ -1,4 +1,5 @@
 const IGNORED_TAGS = ['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE', 'HEAD', 'BR', 'VIDEO', 'CANVAS', 'OBJECT', 'EMBED'];
+const INLINE_TAGS = ['SPAN', 'STRONG', 'B', 'EM', 'I', 'A', 'CODE', 'SUB', 'SUP', 'LABEL', 'MARK', 'SMALL', 'BR'];
 
 /**
  * Utility to convert RGB(A) string to Figma color object
@@ -16,6 +17,278 @@ function parseColor(colorString) {
 }
 
 /**
+ * Inlines computed styles and resolves external references (gradients, etc.) into SVG string
+ */
+function inlineSvgStyles(svgElement) {
+    const cloned = svgElement.cloneNode(true);
+    const referencedIds = new Set();
+
+    function applyStyles(original, clone) {
+        const style = window.getComputedStyle(original);
+
+        // Attributes to inline for Figma to recognize
+        const attrs = {
+            'fill': 'fill',
+            'stroke': 'stroke',
+            'stroke-width': 'stroke-width',
+            'opacity': 'opacity',
+            'display': 'display'
+        };
+
+        for (const [prop, attr] of Object.entries(attrs)) {
+            const val = style.getPropertyValue(prop);
+            if (val && val !== 'none' && val !== '0px' && val !== 'normal') {
+                clone.setAttribute(attr, val);
+
+                // Collect url(#id) references
+                const urlMatch = val.match(/url\(['"]?#([^'"]+)['"]?\)/);
+                if (urlMatch) {
+                    referencedIds.add(urlMatch[1]);
+                }
+            }
+        }
+
+        // Recursively handle children
+        for (let i = 0; i < original.children.length; i++) {
+            if (clone.children[i]) {
+                applyStyles(original.children[i], clone.children[i]);
+            }
+        }
+    }
+
+    applyStyles(svgElement, cloned);
+
+    // Resolve external references (gradients, etc.)
+    if (referencedIds.size > 0) {
+        let defs = cloned.querySelector('defs');
+        if (!defs) {
+            defs = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
+            cloned.insertBefore(defs, cloned.firstChild);
+        }
+
+        for (const id of referencedIds) {
+            // Check if ID already exists in this SVG
+            if (cloned.querySelector(`#${id}`)) continue;
+
+            const externalRef = document.getElementById(id);
+            if (externalRef && (externalRef instanceof SVGGradientElement || externalRef.tagName === 'pattern' || externalRef.tagName === 'mask')) {
+                defs.appendChild(externalRef.cloneNode(true));
+            }
+        }
+    }
+
+    return cloned.outerHTML;
+}
+
+/**
+ * Parses box-shadow string into Figma effects
+ */
+function parseShadows(shadowString) {
+    if (!shadowString || shadowString === 'none') return [];
+
+    // Split by comma but not within rgb/rgba
+    const shadows = shadowString.split(/,(?![^(]*\))/);
+    return shadows.map(s => {
+        const parts = s.trim().split(/\s+(?![^(]*\))/);
+        const inset = parts.includes('inset');
+        const colorPart = parts.find(p => p.includes('rgb') || p.startsWith('#'));
+        const color = parseColor(colorPart);
+
+        // Remove inset and color to get numbers
+        const numbers = parts.filter(p => p !== 'inset' && p !== colorPart).map(p => parseFloat(p));
+
+        return {
+            type: inset ? 'INNER_SHADOW' : 'DROP_SHADOW',
+            color: { r: color.r, g: color.g, b: color.b, a: color.a },
+            offset: { x: numbers[0] || 0, y: numbers[1] || 0 },
+            radius: numbers[2] || 0,
+            spread: numbers[3] || 0,
+            visible: true,
+            blendMode: 'NORMAL'
+        };
+    });
+}
+
+/**
+ * Parses filter/backdrop-filter for blur
+ */
+function parseBlur(filterString) {
+    if (!filterString || filterString === 'none') return null;
+    const match = filterString.match(/blur\((\d+)(?:px)?\)/);
+    if (!match) return null;
+    return parseFloat(match[1]);
+}
+
+/**
+ * Parses CSS linear-gradient into Figma fills
+ */
+function parseGradients(gradientString) {
+    if (!gradientString || gradientString === 'none' || !gradientString.includes('gradient')) return [];
+
+    // Very basic linear-gradient parser
+    const match = gradientString.match(/linear-gradient\((.*)\)/);
+    if (!match) return [];
+
+    const parts = match[1].split(/,(?![^(]*\))/);
+    const stops = [];
+
+    // Simplistic stop extraction
+    for (const part of parts) {
+        const colorMatch = part.match(/rgba?\(.*?\)|#[a-fA-F0-0]{3,6}/);
+        if (colorMatch) {
+            const color = parseColor(colorMatch[0]);
+            stops.push({
+                color: { r: color.r, g: color.g, b: color.b, a: color.a },
+                position: stops.length / (parts.length - 1) // Rough estimation
+            });
+        }
+    }
+
+    if (stops.length < 2) return [];
+
+    return [{
+        type: 'GRADIENT_LINEAR',
+        gradientStops: stops,
+        gradientTransform: [[1, 0, 0], [0, 1, 0]] // Default to top-to-bottom
+    }];
+}
+
+
+/**
+ * Checks if an element should be captured as a single Rich Text layer
+ */
+function isTextContainer(node) {
+    if (node.nodeType !== Node.ELEMENT_NODE) return false;
+    if (node.childNodes.length === 0) return false;
+
+    for (const child of node.childNodes) {
+        if (child.nodeType === Node.TEXT_NODE) continue;
+        if (child.nodeType === Node.ELEMENT_NODE && INLINE_TAGS.includes(child.tagName)) continue;
+        return false;
+    }
+    return true;
+}
+
+/**
+ * Computes the marker (bullet/number) for a list item
+ */
+function getListItemMarker(element) {
+    const style = window.getComputedStyle(element);
+    const listStyleType = style.listStyleType;
+
+    if (listStyleType === 'none') return '';
+
+    if (listStyleType === 'disc') return '• ';
+    if (listStyleType === 'circle') return '○ ';
+    if (listStyleType === 'square') return '■ ';
+
+    if (listStyleType.includes('decimal') || listStyleType.includes('roman') || listStyleType.includes('alpha')) {
+        const parent = element.parentElement;
+        if (parent) {
+            const index = Array.from(parent.children).indexOf(element) + 1;
+            if (index > 0) return `${index}. `;
+        }
+    }
+
+    return '• '; // Default
+}
+
+/**
+ * Builds styling ranges and full text for a rich text container
+ */
+function getRichTextData(element) {
+    let text = "";
+    const ranges = [];
+
+    function walk(node) {
+        if (node.nodeType === Node.TEXT_NODE) {
+            const content = node.textContent;
+            if (content.length > 0) {
+                const parent = node.parentElement;
+                const styles = getStyles(parent);
+                const range = {
+                    start: text.length,
+                    end: text.length + content.length,
+                    fontSize: styles.fontSize,
+                    fontFamily: styles.fontFamily,
+                    fontWeight: styles.fontWeight,
+                    fontStyle: styles.fontStyle,
+                    fill: { type: 'SOLID', color: { r: styles.color.r, g: styles.color.g, b: styles.color.b }, opacity: styles.color.a },
+                    textCase: styles.textTransform === 'uppercase' ? 'UPPER' : (styles.textTransform === 'lowercase' ? 'LOWER' : (styles.textTransform === 'capitalize' ? 'TITLE' : 'ORIGINAL')),
+                    textDecoration: styles.textDecorationLine.includes('line-through') ? 'STRIKETHROUGH' : (styles.textDecorationLine.includes('underline') ? 'UNDERLINE' : 'NONE'),
+                    lineHeight: styles.lineHeight,
+                    letterSpacing: styles.letterSpacing
+                };
+
+                // Add link if inside an <a> tag
+                const linkParent = node.parentElement.closest('a');
+                if (linkParent && linkParent.href) {
+                    range.link = { type: 'URL', value: linkParent.href };
+                }
+
+                ranges.push(range);
+                text += content;
+            }
+        } else if (node.nodeType === Node.ELEMENT_NODE) {
+            const style = window.getComputedStyle(node);
+            if (style.display === 'none') return;
+
+            if (node.tagName === 'BR') {
+                text += "\n";
+            } else {
+                for (const child of node.childNodes) {
+                    walk(child);
+                }
+            }
+        }
+    }
+
+    walk(element);
+
+    // Prepend list marker if this is an LI
+    if (element.tagName === 'LI') {
+        const marker = getListItemMarker(element);
+        if (marker) {
+            const markerLength = marker.length;
+            // Shift existing ranges
+            for (const range of ranges) {
+                range.start += markerLength;
+                range.end += markerLength;
+            }
+            // Add range for the marker itself
+            const styles = getStyles(element);
+            ranges.unshift({
+                start: 0,
+                end: markerLength,
+                fontSize: styles.fontSize,
+                fontFamily: styles.fontFamily,
+                fontWeight: styles.fontWeight,
+                fontStyle: styles.fontStyle,
+                fill: { type: 'SOLID', color: { r: styles.color.r, g: styles.color.g, b: styles.color.b }, opacity: styles.color.a },
+                textCase: 'ORIGINAL',
+                textDecoration: 'NONE',
+                lineHeight: styles.lineHeight,
+                letterSpacing: styles.letterSpacing
+            });
+            text = marker + text;
+        }
+    }
+
+    return { text, ranges };
+}
+
+/**
+ * Normalize font weight for Figma
+ */
+function normalizeFontWeight(weight) {
+    const numericWeight = parseInt(weight);
+    if (!isNaN(numericWeight)) {
+        return numericWeight >= 700 ? 'bold' : 'normal';
+    }
+    return weight.toLowerCase();
+}
+
+/**
  * Capture basic styles for a node
  */
 function getStyles(element) {
@@ -30,12 +303,30 @@ function getStyles(element) {
         backgroundColor: bgColor,
         color: color,
         fontSize: parseFloat(style.fontSize) || 16,
-        fontWeight: style.fontWeight,
+        fontWeight: normalizeFontWeight(style.fontWeight),
+        fontStyle: style.fontStyle,
         fontFamily: fontFamily,
+        textAlign: style.textAlign,
+        lineHeight: parseFloat(style.lineHeight) || undefined,
+        letterSpacing: parseFloat(style.letterSpacing) || 0,
+        textIndent: parseFloat(style.textIndent) || 0,
+        textTransform: style.textTransform,
+        textDecorationLine: style.textDecorationLine,
         borderRadius: parseFloat(style.borderRadius) || 0,
         opacity: parseFloat(style.opacity) || 1,
-        borderWidth: parseFloat(style.borderWidth) || 0,
-        borderColor: parseColor(style.borderColor)
+        overflow: style.overflow,
+        boxShadow: style.boxShadow,
+        filter: style.filter,
+        backdropFilter: style.backdropFilter,
+        backgroundImage: style.backgroundImage,
+        borderTopWidth: (style.borderTopStyle !== 'none' && style.borderTopStyle !== 'hidden') ? parseFloat(style.borderTopWidth) : 0,
+        borderTopColor: parseColor(style.borderTopColor),
+        borderRightWidth: (style.borderRightStyle !== 'none' && style.borderRightStyle !== 'hidden') ? parseFloat(style.borderRightWidth) : 0,
+        borderRightColor: parseColor(style.borderRightColor),
+        borderBottomWidth: (style.borderBottomStyle !== 'none' && style.borderBottomStyle !== 'hidden') ? parseFloat(style.borderBottomWidth) : 0,
+        borderBottomColor: parseColor(style.borderBottomColor),
+        borderLeftWidth: (style.borderLeftStyle !== 'none' && style.borderLeftStyle !== 'hidden') ? parseFloat(style.borderLeftWidth) : 0,
+        borderLeftColor: parseColor(style.borderLeftColor),
     };
 }
 
@@ -74,6 +365,16 @@ function captureNode(node, depth = 0, skipNodes = new Set()) {
 
         const styles = getStyles(parent);
 
+        // Map alignment
+        let textAlignHorizontal = styles.textAlign.toUpperCase();
+        if (textAlignHorizontal === 'START') textAlignHorizontal = 'LEFT';
+        if (textAlignHorizontal === 'END') textAlignHorizontal = 'RIGHT';
+        if (textAlignHorizontal === 'JUSTIFY') textAlignHorizontal = 'JUSTIFIED';
+        if (!['LEFT', 'CENTER', 'RIGHT', 'JUSTIFIED'].includes(textAlignHorizontal)) textAlignHorizontal = 'LEFT';
+
+        const linkParent = parent.closest('a');
+        const link = (linkParent && linkParent.href) ? { type: 'URL', value: linkParent.href } : undefined;
+
         return {
             name: 'Text',
             type: 'TEXT',
@@ -85,6 +386,14 @@ function captureNode(node, depth = 0, skipNodes = new Set()) {
             fontSize: styles.fontSize,
             fontFamily: styles.fontFamily,
             fontWeight: styles.fontWeight,
+            textAlignHorizontal: textAlignHorizontal,
+            lineHeight: styles.lineHeight,
+            letterSpacing: styles.letterSpacing,
+            fontStyle: styles.fontStyle,
+            textIndent: styles.textIndent,
+            link: link,
+            textCase: styles.textTransform === 'uppercase' ? 'UPPER' : (styles.textTransform === 'lowercase' ? 'LOWER' : (styles.textTransform === 'capitalize' ? 'TITLE' : 'ORIGINAL')),
+            textDecoration: styles.textDecorationLine.includes('line-through') ? 'STRIKETHROUGH' : (styles.textDecorationLine.includes('underline') ? 'UNDERLINE' : 'NONE'),
             fills: [{ type: 'SOLID', color: { r: styles.color.r, g: styles.color.g, b: styles.color.b }, opacity: styles.color.a }]
         };
     }
@@ -101,21 +410,83 @@ function captureNode(node, depth = 0, skipNodes = new Set()) {
     const styles = getStyles(node);
     const type = node.tagName === 'IMG' ? 'IMAGE' : (node.tagName === 'svg' || node.tagName === 'SVG' ? 'SVG' : 'FRAME');
 
+    const absX = rect.left + window.scrollX;
+    const absY = rect.top + window.scrollY;
+
     const layer = {
         name: (node.id ? `#${node.id}` : '') || node.tagName,
         type: type,
-        x: rect.left + window.scrollX,
-        y: rect.top + window.scrollY,
+        x: absX,
+        y: absY,
         width: rect.width,
         height: rect.height,
         cornerRadius: styles.borderRadius,
         opacity: styles.opacity,
+        clipsContent: styles.overflow !== 'visible',
         fills: [],
+        effects: [],
         children: []
     };
 
+    // RICH TEXT SUPPORT: If this is a text container or an LI, capture its contents as a single layer
+    if ((isTextContainer(node) || node.tagName === 'LI') && (node.childNodes.length > 0)) {
+        const richText = getRichTextData(node);
+        if (richText.ranges.length > 0) {
+            let textAlignHorizontal = styles.textAlign.toUpperCase();
+            if (textAlignHorizontal === 'START') textAlignHorizontal = 'LEFT';
+            if (textAlignHorizontal === 'END') textAlignHorizontal = 'RIGHT';
+            if (textAlignHorizontal === 'JUSTIFY') textAlignHorizontal = 'JUSTIFIED';
+            if (!['LEFT', 'CENTER', 'RIGHT', 'JUSTIFIED'].includes(textAlignHorizontal)) textAlignHorizontal = 'LEFT';
+
+            layer.children.push({
+                name: 'Rich Text',
+                type: 'TEXT',
+                x: absX,
+                y: absY,
+                width: rect.width,
+                height: rect.height,
+                characters: richText.text,
+                fontSize: styles.fontSize,
+                fontFamily: styles.fontFamily,
+                fontWeight: styles.fontWeight,
+                textAlignHorizontal: textAlignHorizontal,
+                lineHeight: styles.lineHeight,
+                styleRanges: richText.ranges,
+                fills: [{ type: 'SOLID', color: { r: styles.color.r, g: styles.color.g, b: styles.color.b }, opacity: styles.color.a }]
+            });
+            return layer;
+        }
+    }
+
+    // Effects: Shadows
+    if (styles.boxShadow !== 'none') {
+        const shadows = parseShadows(styles.boxShadow);
+        layer.effects.push(...shadows);
+    }
+
+    // Effects: Blur
+    const blur = parseBlur(styles.filter);
+    if (blur) {
+        layer.effects.push({
+            type: 'LAYER_BLUR',
+            radius: blur,
+            visible: true
+        });
+    }
+
+    // Effects: Background Blur
+    const bgBlur = parseBlur(styles.backdropFilter);
+    if (bgBlur) {
+        layer.effects.push({
+            type: 'BACKGROUND_BLUR',
+            radius: bgBlur,
+            visible: true
+        });
+    }
+
+
     if (type === 'SVG') {
-        layer.svgContent = node.outerHTML;
+        layer.svgContent = inlineSvgStyles(node);
         // Don't recurse into SVG children, Figma handles the whole string
         return layer;
     }
@@ -132,13 +503,36 @@ function captureNode(node, depth = 0, skipNodes = new Set()) {
         });
     }
 
-    if (styles.borderWidth > 0) {
+    if (styles.backgroundImage && styles.backgroundImage !== 'none') {
+        const gradients = parseGradients(styles.backgroundImage);
+        layer.fills.push(...gradients);
+    }
+
+    const borderWeights = {
+        top: styles.borderTopWidth,
+        right: styles.borderRightWidth,
+        bottom: styles.borderBottomWidth,
+        left: styles.borderLeftWidth
+    };
+
+    if (borderWeights.top > 0 || borderWeights.right > 0 || borderWeights.bottom > 0 || borderWeights.left > 0) {
+        // Pick the first non-zero color for the stroke
+        const bColor = (borderWeights.top > 0 ? styles.borderTopColor :
+            (borderWeights.right > 0 ? styles.borderRightColor :
+                (borderWeights.bottom > 0 ? styles.borderBottomColor :
+                    styles.borderLeftColor)));
+
         layer.strokes = [{
             type: 'SOLID',
-            color: { r: styles.borderColor.r, g: styles.borderColor.g, b: styles.borderColor.b },
-            opacity: styles.borderColor.a
+            color: { r: bColor.r, g: bColor.g, b: bColor.b },
+            opacity: bColor.a
         }];
-        layer.strokeWeight = styles.borderWidth;
+
+        layer.strokeTopWeight = borderWeights.top;
+        layer.strokeRightWeight = borderWeights.right;
+        layer.strokeBottomWeight = borderWeights.bottom;
+        layer.strokeLeftWeight = borderWeights.left;
+        layer.strokeWeight = Math.max(borderWeights.top, borderWeights.right, borderWeights.bottom, borderWeights.left);
     }
 
     let childCount = 0;
@@ -205,7 +599,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 y: 0,
                 width: document.documentElement.scrollWidth,
                 height: document.documentElement.scrollHeight,
-                children: fixedRoots.map(node => captureNode(node)).filter(Boolean)
+                children: fixedRoots.map(node => captureNode(node, 0, new Set())).filter(Boolean)
             };
 
             const stickyGroup = {
@@ -215,7 +609,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 y: 0,
                 width: document.documentElement.scrollWidth,
                 height: document.documentElement.scrollHeight,
-                children: stickyRoots.map(node => captureNode(node)).filter(Boolean)
+                children: stickyRoots.map(node => captureNode(node, 0, new Set())).filter(Boolean)
             };
 
             const otherGroup = captureNode(document.body, 0, skipNodes);
