@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <style>
+        body {
+            padding: 16px;
+            font-family: Inter, sans-serif;
+        }
+
+        textarea {
+            width: 100%;
+            height: 200px;
+            margin-bottom: 12px;
+            border: 1px solid #E5E5E5;
+            border-radius: 4px;
+            padding: 8px;
+        }
+
+        button {
+            width: 100%;
+            padding: 12px;
+            background: #18A0FB;
+            color: white;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-weight: 600;
+        }
+
+        button:hover {
+            background: #0D8DE3;
+        }
+    </style>
+</head>
+
+<body>
+    <h3>Web2Figma Import</h3>
+    <textarea id="jsonInput" placeholder="Paste captured JSON here..."></textarea>
+    <button id="importBtn">Generate Design</button>
+    <script>
+        document.getElementById('importBtn').addEventListener('click', () => {
+            const json = document.getElementById('jsonInput').value;
+            try {
+                const data = JSON.parse(json);
+                parent.postMessage({ pluginMessage: { type: 'IMPORT', data } }, '*');
+            } catch (e) {
+                alert('Invalid JSON');
+            }
+        });
+    </script>
+</body>
+
+</html>
