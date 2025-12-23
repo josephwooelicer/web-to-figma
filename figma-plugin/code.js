@@ -8,21 +8,36 @@ function normalizeLink(link) {
 }
 
 async function safeLoadFont(fontName) {
+    const { family, style } = fontName;
+
+    const variations = [style];
+
+    // Variation 1: Space adjustments
+    variations.push(style.replace(/\s+/g, '')); // Semi Bold -> SemiBold
+    variations.push(style.replace(/([a-z])([A-Z])/g, '$1 $2')); // SemiBold -> Semi Bold
+
+    // Variation 2: Semantic fallbacks (if bold-ish styles fail)
+    if (style.toLowerCase().includes('bold') || style.toLowerCase().includes('semi')) {
+        variations.push("Bold");
+        variations.push("Semi Bold");
+        variations.push("Medium");
+    }
+
+    variations.push("Regular");
+
+    for (const v of [...new Set(variations)]) { // Unique variations
+        try {
+            const f = { family, style: v };
+            await figma.loadFontAsync(f);
+            return f;
+        } catch (e) { }
+    }
+
     try {
-        await figma.loadFontAsync(fontName);
-        return fontName;
-    } catch (e) {
-        // Fallback 1: Try family + Regular
-        if (fontName.style !== "Regular") {
-            try {
-                const fallback = { family: fontName.family, style: "Regular" };
-                await figma.loadFontAsync(fallback);
-                return fallback;
-            } catch (e2) { }
-        }
-        // Fallback 2: Inter Regular
         await figma.loadFontAsync({ family: "Inter", style: "Regular" });
         return { family: "Inter", style: "Regular" };
+    } catch (e) {
+        return figma.createText().fontName;
     }
 }
 
@@ -31,17 +46,42 @@ async function createLayer(data, parent, parentGlobalX = 0, parentGlobalY = 0) {
 
     if (data.type === 'TEXT') {
         const family = data.fontFamily || "Inter";
-        let style = "Regular";
-        const isBold = data.fontWeight && data.fontWeight.toString().includes('bold');
         const isItalic = data.fontStyle === 'italic';
 
-        if (isBold && isItalic) style = "Bold Italic";
-        else if (isBold) style = "Bold";
-        else if (isItalic) style = "Italic";
+        // Improved weight mapping
+        let weightStr = (data.fontWeight || 'regular').toString().toLowerCase();
+        let styleName = "Regular";
 
-        const loadedFont = await safeLoadFont({ family, style });
+        const weights = {
+            'light': 'Light',
+            'regular': 'Regular',
+            'medium': 'Medium',
+            'semibold': 'Semi Bold',
+            'bold': 'Bold',
+            'extrabold': 'Extra Bold',
+            'black': 'Black'
+        };
+
+        if (weights[weightStr]) {
+            styleName = weights[weightStr];
+        }
+
+        if (isItalic) {
+            styleName = styleName === "Regular" ? "Italic" : `${styleName} Italic`;
+        }
+
+        const loadedFont = await safeLoadFont({ family, style: styleName });
         layer = figma.createText();
         layer.fontName = loadedFont;
+
+        // If vertical alignment is specified and not TOP, we should keep the box height 
+        // to allow Figma's vertical centering to work. 
+        if (data.textAlignVertical && data.textAlignVertical !== 'TOP') {
+            layer.textAutoResize = "NONE"; // Fixed size allows vertical alignment
+            layer.textAlignVertical = data.textAlignVertical;
+        } else {
+            layer.textAutoResize = "WIDTH_AND_HEIGHT";
+        }
 
         if (data.textIndent) {
             layer.paragraphIndent = data.textIndent;
@@ -50,19 +90,19 @@ async function createLayer(data, parent, parentGlobalX = 0, parentGlobalY = 0) {
         layer.characters = data.characters || "";
 
         if (data.styleRanges && data.styleRanges.length > 0) {
-            // Pre-load all fonts needed for ranges
-            const fonts = new Set();
+            // ... (pre-load logic)
             for (const range of data.styleRanges) {
-                const rIsBold = range.fontWeight === 'bold';
                 const rIsItalic = range.fontStyle === 'italic';
-                let rStyle = "Regular";
-                if (rIsBold && rIsItalic) rStyle = "Bold Italic";
-                else if (rIsBold) rStyle = "Bold";
-                else if (rIsItalic) rStyle = "Italic";
+                let rWeightStr = (range.fontWeight || 'regular').toString().toLowerCase();
+                let rStyleName = weights[rWeightStr] || "Regular";
 
-                const fontToLoad = { family: range.fontFamily || "Inter", style: rStyle };
+                if (rIsItalic) {
+                    rStyleName = rStyleName === "Regular" ? "Italic" : `${rStyleName} Italic`;
+                }
+
+                const fontToLoad = { family: range.fontFamily || "Inter", style: rStyleName };
                 const loaded = await safeLoadFont(fontToLoad);
-                range.actualFontName = loaded; // Store the successfully loaded font
+                range.actualFontName = loaded;
             }
 
             // Apply ranges
@@ -72,11 +112,9 @@ async function createLayer(data, parent, parentGlobalX = 0, parentGlobalY = 0) {
                 if (start >= end) continue;
 
                 if (range.fontSize) layer.setRangeFontSize(start, end, range.fontSize);
-
                 if (range.actualFontName) {
                     layer.setRangeFontName(start, end, range.actualFontName);
                 }
-
                 if (range.fill) layer.setRangeFills(start, end, [range.fill]);
                 if (range.textCase) layer.setRangeTextCase(start, end, range.textCase);
                 if (range.textDecoration) layer.setRangeTextDecoration(start, end, range.textDecoration);
@@ -89,6 +127,10 @@ async function createLayer(data, parent, parentGlobalX = 0, parentGlobalY = 0) {
                 if (range.link) {
                     const normalized = normalizeLink(range.link);
                     if (normalized) layer.setRangeHyperlink(start, end, normalized);
+                }
+                if (range.listOptions) {
+                    layer.setRangeListOptions(start, end, range.listOptions);
+                    layer.hangingList = true;
                 }
             }
         } else {
@@ -108,6 +150,7 @@ async function createLayer(data, parent, parentGlobalX = 0, parentGlobalY = 0) {
         }
 
         if (data.textAlignHorizontal) layer.textAlignHorizontal = data.textAlignHorizontal;
+        if (data.textAlignVertical) layer.textAlignVertical = data.textAlignVertical;
     } else if (data.type === 'SVG') {
         try {
             layer = figma.createNodeFromSvg(data.svgContent);
@@ -141,7 +184,12 @@ async function createLayer(data, parent, parentGlobalX = 0, parentGlobalY = 0) {
     layer.x = data.x - parentGlobalX;
     layer.y = data.y - parentGlobalY;
 
-    if (data.cornerRadius) {
+    if (data.topLeftRadius !== undefined) {
+        layer.topLeftRadius = data.topLeftRadius;
+        layer.topRightRadius = data.topRightRadius;
+        layer.bottomLeftRadius = data.bottomLeftRadius;
+        layer.bottomRightRadius = data.bottomRightRadius;
+    } else if (data.cornerRadius) {
         layer.cornerRadius = data.cornerRadius;
     }
 
@@ -156,11 +204,22 @@ async function createLayer(data, parent, parentGlobalX = 0, parentGlobalY = 0) {
 
     // Fills
     if (data.fills && data.fills.length > 0) {
-        layer.fills = data.fills.map(f => ({
-            type: f.type,
-            color: f.color,
-            opacity: f.opacity !== undefined ? f.opacity : 1
-        }));
+        layer.fills = data.fills.map(f => {
+            if (f.type === 'SOLID') {
+                return {
+                    type: 'SOLID',
+                    color: f.color,
+                    opacity: f.opacity !== undefined ? f.opacity : 1
+                };
+            } else if (f.type === 'GRADIENT_LINEAR') {
+                return {
+                    type: 'GRADIENT_LINEAR',
+                    gradientStops: f.gradientStops,
+                    gradientTransform: f.gradientTransform || [[1, 0, 0], [0, 1, 0]]
+                };
+            }
+            return null;
+        }).filter(Boolean);
     } else if (data.type === 'FRAME') {
         layer.fills = [];
     }

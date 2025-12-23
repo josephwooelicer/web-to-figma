@@ -120,6 +120,15 @@ function parseBlur(filterString) {
 }
 
 /**
+ * Collapses HTML whitespace: replaces tabs, newlines, and multiple spaces with a single space.
+ * Trims leading/trailing whitespace if requested.
+ */
+function collapseWhitespace(text, trim = false) {
+    let collapsed = text.replace(/[\t\n\r ]+/g, ' ');
+    return trim ? collapsed.trim() : collapsed;
+}
+
+/**
  * Parses CSS linear-gradient into Figma fills
  */
 function parseGradients(gradientString) {
@@ -156,14 +165,27 @@ function parseGradients(gradientString) {
 
 /**
  * Checks if an element should be captured as a single Rich Text layer
+ * We skip this if the element itself has visible backgrounds/borders that need to be preserved as a Frame.
  */
 function isTextContainer(node) {
     if (node.nodeType !== Node.ELEMENT_NODE) return false;
     if (node.childNodes.length === 0) return false;
 
+    const style = window.getComputedStyle(node);
+    const hasVisibleBackground = (parseColor(style.backgroundColor).a > 0) || (style.backgroundImage && style.backgroundImage !== 'none');
+    const hasVisibleBorder = parseFloat(style.borderTopWidth) > 0 || parseFloat(style.borderRightWidth) > 0 || parseFloat(style.borderBottomWidth) > 0 || parseFloat(style.borderLeftWidth) > 0;
+
+    // If it has a background or border, we want to capture it as a Frame with children, not just a flattened TEXT node
+    if (hasVisibleBackground || hasVisibleBorder) return false;
+
     for (const child of node.childNodes) {
         if (child.nodeType === Node.TEXT_NODE) continue;
-        if (child.nodeType === Node.ELEMENT_NODE && INLINE_TAGS.includes(child.tagName)) continue;
+        if (child.nodeType === Node.ELEMENT_NODE && INLINE_TAGS.includes(child.tagName)) {
+            // Check if inline child has background/border
+            const childStyle = window.getComputedStyle(child);
+            if (parseColor(childStyle.backgroundColor).a > 0 || (childStyle.backgroundImage && childStyle.backgroundImage !== 'none')) return false;
+            continue;
+        }
         return false;
     }
     return true;
@@ -172,25 +194,44 @@ function isTextContainer(node) {
 /**
  * Computes the marker (bullet/number) for a list item
  */
-function getListItemMarker(element) {
+function getListItemMarkerType(element) {
     const style = window.getComputedStyle(element);
     const listStyleType = style.listStyleType;
 
-    if (listStyleType === 'none') return '';
-
-    if (listStyleType === 'disc') return '• ';
-    if (listStyleType === 'circle') return '○ ';
-    if (listStyleType === 'square') return '■ ';
+    if (listStyleType === 'none') return null;
 
     if (listStyleType.includes('decimal') || listStyleType.includes('roman') || listStyleType.includes('alpha')) {
-        const parent = element.parentElement;
-        if (parent) {
-            const index = Array.from(parent.children).indexOf(element) + 1;
-            if (index > 0) return `${index}. `;
-        }
+        return 'ORDERED';
     }
 
-    return '• '; // Default
+    return 'UNORDERED';
+}
+
+/**
+ * Detects the effective text decoration for an element by traversing up the DOM tree.
+ * Propagated decorations (like underlines from links) are not strictly inherited 
+ * but are rendered on all text descendants.
+ */
+function getEffectiveTextDecoration(element) {
+    let current = element;
+    let underline = false;
+    let strikethrough = false;
+
+    while (current && current !== document.body) {
+        const style = window.getComputedStyle(current);
+        const line = style.textDecorationLine;
+        if (line.includes('underline')) underline = true;
+        if (line.includes('line-through')) strikethrough = true;
+
+        // Stop if we find an anchor tag that might be defining the decoration
+        // or a block element that might break decoration propagation (though rare)
+        current = current.parentElement;
+    }
+
+    if (underline && strikethrough) return 'STRIKETHROUGH_AND_UNDERLINE'; // Figma doesn't support both simultaneously easily, prioritize
+    if (strikethrough) return 'STRIKETHROUGH';
+    if (underline) return 'UNDERLINE';
+    return 'NONE';
 }
 
 /**
@@ -202,7 +243,9 @@ function getRichTextData(element) {
 
     function walk(node) {
         if (node.nodeType === Node.TEXT_NODE) {
-            const content = node.textContent;
+            let content = node.textContent;
+            // Collapse whitespace within this chunk
+            content = collapseWhitespace(content);
             if (content.length > 0) {
                 const parent = node.parentElement;
                 const styles = getStyles(parent);
@@ -215,12 +258,11 @@ function getRichTextData(element) {
                     fontStyle: styles.fontStyle,
                     fill: { type: 'SOLID', color: { r: styles.color.r, g: styles.color.g, b: styles.color.b }, opacity: styles.color.a },
                     textCase: styles.textTransform === 'uppercase' ? 'UPPER' : (styles.textTransform === 'lowercase' ? 'LOWER' : (styles.textTransform === 'capitalize' ? 'TITLE' : 'ORIGINAL')),
-                    textDecoration: styles.textDecorationLine.includes('line-through') ? 'STRIKETHROUGH' : (styles.textDecorationLine.includes('underline') ? 'UNDERLINE' : 'NONE'),
+                    textDecoration: getEffectiveTextDecoration(parent),
                     lineHeight: styles.lineHeight,
                     letterSpacing: styles.letterSpacing
                 };
 
-                // Add link if inside an <a> tag
                 const linkParent = node.parentElement.closest('a');
                 if (linkParent && linkParent.href) {
                     range.link = { type: 'URL', value: linkParent.href };
@@ -244,33 +286,26 @@ function getRichTextData(element) {
     }
 
     walk(element);
+    // Trim and adjust ranges
+    const originalLength = text.length;
+    text = text.trim();
+    const diff = originalLength - text.length;
+    if (diff > 0) {
+        const leadingSpaces = originalLength - text.replace(/^\s+/, '').length;
+        for (const range of ranges) {
+            range.start = Math.max(0, range.start - leadingSpaces);
+            range.end = Math.max(0, range.end - leadingSpaces);
+        }
+    }
 
-    // Prepend list marker if this is an LI
+    // Add list marker metadata if this is an LI
     if (element.tagName === 'LI') {
-        const marker = getListItemMarker(element);
-        if (marker) {
-            const markerLength = marker.length;
-            // Shift existing ranges
+        const listType = getListItemMarkerType(element);
+        if (listType) {
+            // Apply list metadata to all ranges in this LI
             for (const range of ranges) {
-                range.start += markerLength;
-                range.end += markerLength;
+                range.listOptions = { type: listType };
             }
-            // Add range for the marker itself
-            const styles = getStyles(element);
-            ranges.unshift({
-                start: 0,
-                end: markerLength,
-                fontSize: styles.fontSize,
-                fontFamily: styles.fontFamily,
-                fontWeight: styles.fontWeight,
-                fontStyle: styles.fontStyle,
-                fill: { type: 'SOLID', color: { r: styles.color.r, g: styles.color.g, b: styles.color.b }, opacity: styles.color.a },
-                textCase: 'ORIGINAL',
-                textDecoration: 'NONE',
-                lineHeight: styles.lineHeight,
-                letterSpacing: styles.letterSpacing
-            });
-            text = marker + text;
         }
     }
 
@@ -279,13 +314,22 @@ function getRichTextData(element) {
 
 /**
  * Normalize font weight for Figma
+ * Mapping numeric weights to common strings or returning the number
  */
 function normalizeFontWeight(weight) {
     const numericWeight = parseInt(weight);
     if (!isNaN(numericWeight)) {
-        return numericWeight >= 700 ? 'bold' : 'normal';
+        if (numericWeight <= 300) return 'light';
+        if (numericWeight <= 400) return 'regular';
+        if (numericWeight <= 500) return 'medium';
+        if (numericWeight <= 600) return 'semibold';
+        if (numericWeight <= 700) return 'bold';
+        if (numericWeight <= 800) return 'extrabold';
+        return 'black';
     }
-    return weight.toLowerCase();
+    const w = weight.toLowerCase();
+    if (w === 'normal') return 'regular';
+    return w;
 }
 
 /**
@@ -313,6 +357,14 @@ function getStyles(element) {
         textTransform: style.textTransform,
         textDecorationLine: style.textDecorationLine,
         borderRadius: parseFloat(style.borderRadius) || 0,
+        topLeftRadius: parseFloat(style.borderTopLeftRadius) || 0,
+        topRightRadius: parseFloat(style.borderTopRightRadius) || 0,
+        bottomLeftRadius: parseFloat(style.borderBottomLeftRadius) || 0,
+        bottomRightRadius: parseFloat(style.borderBottomRightRadius) || 0,
+        paddingTop: parseFloat(style.paddingTop) || 0,
+        paddingRight: parseFloat(style.paddingRight) || 0,
+        paddingBottom: parseFloat(style.paddingBottom) || 0,
+        paddingLeft: parseFloat(style.paddingLeft) || 0,
         opacity: parseFloat(style.opacity) || 1,
         overflow: style.overflow,
         boxShadow: style.boxShadow,
@@ -327,6 +379,11 @@ function getStyles(element) {
         borderBottomColor: parseColor(style.borderBottomColor),
         borderLeftWidth: (style.borderLeftStyle !== 'none' && style.borderLeftStyle !== 'hidden') ? parseFloat(style.borderLeftWidth) : 0,
         borderLeftColor: parseColor(style.borderLeftColor),
+        display: style.display,
+        flexDirection: style.flexDirection,
+        alignItems: style.alignItems,
+        justifyContent: style.justifyContent,
+        verticalAlign: style.verticalAlign,
     };
 }
 
@@ -341,8 +398,8 @@ function captureNode(node, depth = 0, skipNodes = new Set()) {
     if (skipNodes.has(node)) return null;
 
     if (node.nodeType === Node.TEXT_NODE) {
-        const text = node.textContent.trim();
-        if (!text) return null;
+        const textContent = collapseWhitespace(node.textContent, true);
+        if (!textContent) return null;
 
         const parent = node.parentElement;
         if (!parent) return null;
@@ -372,6 +429,21 @@ function captureNode(node, depth = 0, skipNodes = new Set()) {
         if (textAlignHorizontal === 'JUSTIFY') textAlignHorizontal = 'JUSTIFIED';
         if (!['LEFT', 'CENTER', 'RIGHT', 'JUSTIFIED'].includes(textAlignHorizontal)) textAlignHorizontal = 'LEFT';
 
+        // Map vertical alignment
+        let textAlignVertical = 'TOP';
+        if (styles.verticalAlign === 'middle') textAlignVertical = 'CENTER';
+        else if (styles.verticalAlign === 'bottom') textAlignVertical = 'BOTTOM';
+
+        // Check parent's flex/grid alignment
+        const parentNode = node.parentElement;
+        if (parentNode) {
+            const pStyle = window.getComputedStyle(parentNode);
+            if (pStyle.display === 'flex' || pStyle.display === 'inline-flex' || pStyle.display === 'grid') {
+                if (pStyle.alignItems === 'center') textAlignVertical = 'CENTER';
+                else if (pStyle.alignItems === 'flex-end' || pStyle.alignItems === 'end') textAlignVertical = 'BOTTOM';
+            }
+        }
+
         const linkParent = parent.closest('a');
         const link = (linkParent && linkParent.href) ? { type: 'URL', value: linkParent.href } : undefined;
 
@@ -382,7 +454,7 @@ function captureNode(node, depth = 0, skipNodes = new Set()) {
             y: top + window.scrollY,
             width: right - left,
             height: bottom - top,
-            characters: node.textContent,
+            characters: textContent,
             fontSize: styles.fontSize,
             fontFamily: styles.fontFamily,
             fontWeight: styles.fontWeight,
@@ -392,8 +464,9 @@ function captureNode(node, depth = 0, skipNodes = new Set()) {
             fontStyle: styles.fontStyle,
             textIndent: styles.textIndent,
             link: link,
+            textAlignVertical: textAlignVertical,
             textCase: styles.textTransform === 'uppercase' ? 'UPPER' : (styles.textTransform === 'lowercase' ? 'LOWER' : (styles.textTransform === 'capitalize' ? 'TITLE' : 'ORIGINAL')),
-            textDecoration: styles.textDecorationLine.includes('line-through') ? 'STRIKETHROUGH' : (styles.textDecorationLine.includes('underline') ? 'UNDERLINE' : 'NONE'),
+            textDecoration: getEffectiveTextDecoration(parent),
             fills: [{ type: 'SOLID', color: { r: styles.color.r, g: styles.color.g, b: styles.color.b }, opacity: styles.color.a }]
         };
     }
@@ -421,6 +494,10 @@ function captureNode(node, depth = 0, skipNodes = new Set()) {
         width: rect.width,
         height: rect.height,
         cornerRadius: styles.borderRadius,
+        topLeftRadius: styles.topLeftRadius,
+        topRightRadius: styles.topRightRadius,
+        bottomLeftRadius: styles.bottomLeftRadius,
+        bottomRightRadius: styles.bottomRightRadius,
         opacity: styles.opacity,
         clipsContent: styles.overflow !== 'visible',
         fills: [],
@@ -438,6 +515,13 @@ function captureNode(node, depth = 0, skipNodes = new Set()) {
             if (textAlignHorizontal === 'JUSTIFY') textAlignHorizontal = 'JUSTIFIED';
             if (!['LEFT', 'CENTER', 'RIGHT', 'JUSTIFIED'].includes(textAlignHorizontal)) textAlignHorizontal = 'LEFT';
 
+            // Map vertical alignment for rich text
+            let textAlignVertical = 'TOP';
+            if (styles.display === 'flex' || styles.display === 'inline-flex' || styles.display === 'grid') {
+                if (styles.alignItems === 'center') textAlignVertical = 'CENTER';
+                else if (styles.alignItems === 'flex-end' || styles.alignItems === 'end') textAlignVertical = 'BOTTOM';
+            }
+
             layer.children.push({
                 name: 'Rich Text',
                 type: 'TEXT',
@@ -450,6 +534,7 @@ function captureNode(node, depth = 0, skipNodes = new Set()) {
                 fontFamily: styles.fontFamily,
                 fontWeight: styles.fontWeight,
                 textAlignHorizontal: textAlignHorizontal,
+                textAlignVertical: textAlignVertical,
                 lineHeight: styles.lineHeight,
                 styleRanges: richText.ranges,
                 fills: [{ type: 'SOLID', color: { r: styles.color.r, g: styles.color.g, b: styles.color.b }, opacity: styles.color.a }]
