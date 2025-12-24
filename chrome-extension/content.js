@@ -204,9 +204,17 @@ function isTextContainer(node) {
 
     for (const child of node.childNodes) {
         if (child.nodeType === Node.TEXT_NODE) continue;
-        if (child.nodeType === Node.ELEMENT_NODE && INLINE_TAGS.includes(child.tagName)) {
-            // Allow inline tags even if they have backgrounds/borders
-            // We'll lose the background in Figma but preserve the text flow
+        if (child.nodeType === Node.ELEMENT_NODE) {
+            if (!INLINE_TAGS.includes(child.tagName)) return false;
+
+            // Even if it's an inline tag, if it has a background, border, or is a flex/grid container,
+            // we want to preserve its structure as a Frame.
+            const childStyle = window.getComputedStyle(child);
+            const hasBg = (parseColor(childStyle.backgroundColor).a > 0) || (childStyle.backgroundImage && childStyle.backgroundImage !== 'none');
+            const hasBorder = parseFloat(childStyle.borderTopWidth) > 0 || parseFloat(childStyle.borderRightWidth) > 0 || parseFloat(childStyle.borderBottomWidth) > 0 || parseFloat(childStyle.borderLeftWidth) > 0;
+            const isFlexGrid = childStyle.display === 'flex' || childStyle.display === 'inline-flex' || childStyle.display === 'grid' || childStyle.display === 'inline-grid';
+
+            if (hasBg || hasBorder || isFlexGrid) return false;
             continue;
         }
         return false;
@@ -534,8 +542,8 @@ function captureNode(node, depth = 0, skipNodes = new Set()) {
         children: []
     };
 
-    // RICH TEXT SUPPORT: If this is a text container or an LI, capture its contents as a single layer
-    if ((isTextContainer(node) || node.tagName === 'LI') && (node.childNodes.length > 0)) {
+    // RICH TEXT SUPPORT: If this is a text container, capture its contents as a single layer
+    if (isTextContainer(node) && (node.childNodes.length > 0)) {
         const richText = getRichTextData(node);
         if (richText.ranges.length > 0) {
             let textAlignHorizontal = styles.textAlign.toUpperCase();
@@ -647,6 +655,43 @@ function captureNode(node, depth = 0, skipNodes = new Set()) {
         layer.strokeBottomWeight = borderWeights.bottom;
         layer.strokeLeftWeight = borderWeights.left;
         layer.strokeWeight = Math.max(borderWeights.top, borderWeights.right, borderWeights.bottom, borderWeights.left);
+    }
+
+    // Special handling for form elements: INPUT, TEXTAREA, SELECT
+    // These elements don't have text nodes for their values, so we create a virtual text layer
+    if (node.tagName === 'INPUT' || node.tagName === 'TEXTAREA' || node.tagName === 'SELECT') {
+        let valueText = "";
+        if (node.tagName === 'SELECT') {
+            const selectedOption = node.options[node.selectedIndex];
+            valueText = selectedOption ? selectedOption.text : "";
+        } else {
+            valueText = node.value || "";
+        }
+
+        if (valueText) {
+            let textAlignHorizontal = styles.textAlign.toUpperCase();
+            if (textAlignHorizontal === 'START') textAlignHorizontal = 'LEFT';
+            if (textAlignHorizontal === 'END') textAlignHorizontal = 'RIGHT';
+            if (textAlignHorizontal === 'JUSTIFY') textAlignHorizontal = 'JUSTIFIED';
+            if (!['LEFT', 'CENTER', 'RIGHT', 'JUSTIFIED'].includes(textAlignHorizontal)) textAlignHorizontal = 'LEFT';
+
+            layer.children.push({
+                name: 'Value',
+                type: 'TEXT',
+                x: absX + styles.paddingLeft,
+                y: absY + styles.paddingTop,
+                width: rect.width - styles.paddingLeft - styles.paddingRight,
+                height: rect.height - styles.paddingTop - styles.paddingBottom,
+                characters: valueText,
+                fontSize: styles.fontSize,
+                fontFamily: styles.fontFamily,
+                fontWeight: styles.fontWeight,
+                textAlignHorizontal: textAlignHorizontal,
+                textAlignVertical: 'CENTER', // Generally vertically centered in standard inputs
+                lineHeight: styles.lineHeight,
+                fills: [{ type: 'SOLID', color: { r: styles.color.r, g: styles.color.g, b: styles.color.b }, opacity: styles.color.a }]
+            });
+        }
     }
 
     let childCount = 0;
