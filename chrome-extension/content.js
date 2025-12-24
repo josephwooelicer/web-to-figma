@@ -444,6 +444,8 @@ function getStyles(element) {
         right: style.right,
         bottom: style.bottom,
         left: style.left,
+        zIndex: style.zIndex,
+        float: style.float,
     };
 }
 
@@ -528,7 +530,12 @@ function captureNode(node, depth = 0, skipNodes = new Set(), parentYAdjustment =
             textAlignVertical: textAlignVertical,
             textCase: styles.textTransform === 'uppercase' ? 'UPPER' : (styles.textTransform === 'lowercase' ? 'LOWER' : (styles.textTransform === 'capitalize' ? 'TITLE' : 'ORIGINAL')),
             textDecoration: getEffectiveTextDecoration(parent),
-            fills: [{ type: 'SOLID', color: { r: styles.color.r, g: styles.color.g, b: styles.color.b }, opacity: styles.color.a }]
+            textDecoration: getEffectiveTextDecoration(parent),
+            fills: [{ type: 'SOLID', color: { r: styles.color.r, g: styles.color.g, b: styles.color.b }, opacity: styles.color.a }],
+            // Store style props for sorting
+            _zIndex: 'auto',
+            _position: 'static',
+            _float: 'none'
         };
     }
 
@@ -592,7 +599,11 @@ function captureNode(node, depth = 0, skipNodes = new Set(), parentYAdjustment =
         clipsContent: styles.overflow !== 'visible',
         fills: [],
         effects: [],
-        children: []
+        children: [],
+        // Store style props for sorting
+        _zIndex: styles.zIndex,
+        _position: styles.position,
+        _float: styles.float
     };
 
     // RICH TEXT SUPPORT: If this is a text container, capture its contents as a single layer
@@ -714,11 +725,18 @@ function captureNode(node, depth = 0, skipNodes = new Set(), parentYAdjustment =
     // These elements don't have text nodes for their values, so we create a virtual text layer
     if (node.tagName === 'INPUT' || node.tagName === 'TEXTAREA' || node.tagName === 'SELECT') {
         let valueText = "";
+        let isPlaceholder = false;
+
         if (node.tagName === 'SELECT') {
             const selectedOption = node.options[node.selectedIndex];
             valueText = selectedOption ? selectedOption.text : "";
         } else {
             valueText = node.value || "";
+            // If no value, check for placeholder
+            if (!valueText && node.placeholder) {
+                valueText = node.placeholder;
+                isPlaceholder = true;
+            }
         }
 
         if (valueText) {
@@ -728,8 +746,11 @@ function captureNode(node, depth = 0, skipNodes = new Set(), parentYAdjustment =
             if (textAlignHorizontal === 'JUSTIFY') textAlignHorizontal = 'JUSTIFIED';
             if (!['LEFT', 'CENTER', 'RIGHT', 'JUSTIFIED'].includes(textAlignHorizontal)) textAlignHorizontal = 'LEFT';
 
+            // Use reduced opacity for placeholder text
+            const textOpacity = isPlaceholder ? 0.5 : styles.color.a;
+
             layer.children.push({
-                name: 'Value',
+                name: isPlaceholder ? 'Placeholder' : 'Value',
                 type: 'TEXT',
                 x: absX + styles.paddingLeft,
                 y: absY + styles.paddingTop,
@@ -742,7 +763,7 @@ function captureNode(node, depth = 0, skipNodes = new Set(), parentYAdjustment =
                 textAlignHorizontal: textAlignHorizontal,
                 textAlignVertical: 'CENTER', // Generally vertically centered in standard inputs
                 lineHeight: styles.lineHeight,
-                fills: [{ type: 'SOLID', color: { r: styles.color.r, g: styles.color.g, b: styles.color.b }, opacity: styles.color.a }]
+                fills: [{ type: 'SOLID', color: { r: styles.color.r, g: styles.color.g, b: styles.color.b }, opacity: textOpacity }]
             });
         }
     }
@@ -756,6 +777,62 @@ function captureNode(node, depth = 0, skipNodes = new Set(), parentYAdjustment =
             childCount++;
         }
     }
+
+    // Sort children based on CSS stacking context rules
+    // 1. Backgrounds and borders (handled by parent container in Figma)
+    // 2. Negative z-index children
+    // 3. Block-level, non-positioned children
+    // 4. Floated, non-positioned children
+    // 5. Inline, non-positioned children (text nodes handled here)
+    // 6. Positioned children (z-index: auto or 0)
+    // 7. Positive z-index children
+
+    layer.children.sort((a, b) => {
+        const getWeight = (childLayer) => {
+            // Text nodes are effectively inline-level content
+            if (childLayer.type === 'TEXT') return 5;
+
+            // For other elements, we need their style info. 
+            // Since we don't persist the raw style object in the layer, we need to infer or store it.
+            // Ideally, we should have stored these properties on the layer object during creation.
+            // Let's assume we add them to the layer object in the captureNode function above.
+
+            const zIndexVal = childLayer._zIndex === 'auto' ? 0 : parseInt(childLayer._zIndex || '0');
+            const position = childLayer._position || 'static';
+            const float = childLayer._float || 'none';
+            const isPositioned = position !== 'static';
+
+            if (isPositioned) {
+                if (zIndexVal < 0) return 1;
+                if (zIndexVal > 0) return 6 + zIndexVal; // Higher z-index = higher weight
+                return 6; // Positioned, z-index auto/0
+            }
+
+            // Static alignment
+            if (float !== 'none') return 4;
+            // We can't easily distinguish block vs inline purely from Figma layer props without more data,
+            // but generally non-positioned elements come before positioned specific ones in painting order.
+            // Let's treat them as standard flow (3). 
+            // Note: Inline elements are technically painted later (5), but for basic structure 3 is safer default.
+            return 3;
+        };
+
+        const weightA = getWeight(a);
+        const weightB = getWeight(b);
+
+        if (weightA !== weightB) {
+            return weightA - weightB;
+        }
+        // If weights are equal, maintain DOM order (stable sort)
+        return 0;
+    });
+
+    // Remove temporary properties used for sorting
+    layer.children.forEach(child => {
+        delete child._zIndex;
+        delete child._position;
+        delete child._float;
+    });
 
     return layer;
 }
