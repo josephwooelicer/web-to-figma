@@ -49,6 +49,24 @@ function inlineSvgStyles(svgElement) {
             'font-weight': 'font-weight'
         };
 
+        // Special handling for gradient stop elements
+        if (original.tagName === 'stop') {
+            const stopColor = style.getPropertyValue('stop-color');
+            const stopOpacity = style.getPropertyValue('stop-opacity');
+
+            if (stopColor && stopColor !== 'none') {
+                clone.setAttribute('stop-color', stopColor);
+            }
+            if (stopOpacity && stopOpacity !== 'none' && stopOpacity !== '1') {
+                clone.setAttribute('stop-opacity', stopOpacity);
+            }
+
+            // Also preserve offset attribute if present
+            if (original.hasAttribute('offset')) {
+                clone.setAttribute('offset', original.getAttribute('offset'));
+            }
+        }
+
         for (const [prop, attr] of Object.entries(attrs)) {
             let val = style.getPropertyValue(prop);
             if (val && val !== 'none' && val !== 'normal') {
@@ -421,6 +439,11 @@ function getStyles(element) {
         verticalAlign: style.verticalAlign,
         columnGap: parseFloat(style.columnGap) || 0,
         rowGap: parseFloat(style.rowGap) || 0,
+        position: style.position,
+        top: style.top,
+        right: style.right,
+        bottom: style.bottom,
+        left: style.left,
     };
 }
 
@@ -429,8 +452,9 @@ function getStyles(element) {
  * @param {Node} node
  * @param {number} depth
  * @param {Set<Node>} skipNodes Nodes to skip during traversal (already captured in other groups)
+ * @param {number} parentYAdjustment Y offset adjustment from parent fixed bottom positioning
  */
-function captureNode(node, depth = 0, skipNodes = new Set()) {
+function captureNode(node, depth = 0, skipNodes = new Set(), parentYAdjustment = 0) {
     if (depth > 50) return null;
     if (skipNodes.has(node)) return null;
 
@@ -520,8 +544,37 @@ function captureNode(node, depth = 0, skipNodes = new Set()) {
     const styles = getStyles(node);
     const type = node.tagName === 'IMG' ? 'IMAGE' : (node.tagName === 'svg' || node.tagName === 'SVG' ? 'SVG' : 'FRAME');
 
-    const absX = rect.left + window.scrollX;
-    const absY = rect.top + window.scrollY;
+    let absX = rect.left + window.scrollX;
+    let absY = rect.top + window.scrollY;
+
+    // Track Y adjustment for this element to pass to children
+    let currentYAdjustment = parentYAdjustment;
+
+    // Handle fixed positioning
+    if (styles.position === 'fixed') {
+        // Fixed elements with explicit top should stay at the top (use viewport position)
+        if (styles.top !== 'auto' && styles.top !== '') {
+            // Use viewport position, not scrolled position
+            const topValue = parseFloat(styles.top) || 0;
+            absY = rect.top; // Use viewport position directly
+            // Calculate adjustment needed for children: they should also use viewport coords
+            // Children will initially calculate as rect.top + scrollY, so we need to subtract scrollY
+            currentYAdjustment = -window.scrollY;
+        }
+        // Fixed elements with bottom positioning should be at the page bottom
+        else if (styles.bottom !== 'auto' && styles.bottom !== '') {
+            const bottomValue = parseFloat(styles.bottom) || 0;
+            const pageHeight = document.documentElement.scrollHeight;
+            const originalY = absY;
+            // Position from the bottom of the page
+            absY = pageHeight - rect.height - bottomValue;
+            // Calculate the adjustment made
+            currentYAdjustment = absY - originalY;
+        }
+    } else if (parentYAdjustment !== 0) {
+        // Apply parent's Y adjustment to non-fixed elements
+        absY += parentYAdjustment;
+    }
 
     const layer = {
         name: (node.id ? `#${node.id}` : '') || node.tagName,
@@ -697,7 +750,7 @@ function captureNode(node, depth = 0, skipNodes = new Set()) {
     let childCount = 0;
     for (const child of node.childNodes) {
         if (childCount > 500) break;
-        const childLayer = captureNode(child, depth + 1, skipNodes);
+        const childLayer = captureNode(child, depth + 1, skipNodes, currentYAdjustment);
         if (childLayer) {
             layer.children.push(childLayer);
             childCount++;
