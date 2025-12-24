@@ -278,13 +278,13 @@ async function createLayer(data, parent, parentGlobalX = 0, parentGlobalY = 0) {
 
         layer.strokeAlign = 'INSIDE';
 
-        if (data.strokeTopWeight !== undefined) {
+        if (data.strokeTopWeight !== undefined && (data.strokeTopWeight > 0 || data.strokeRightWeight > 0 || data.strokeBottomWeight > 0 || data.strokeLeftWeight > 0)) {
             layer.strokeTopWeight = data.strokeTopWeight;
             layer.strokeRightWeight = data.strokeRightWeight;
             layer.strokeBottomWeight = data.strokeBottomWeight;
             layer.strokeLeftWeight = data.strokeLeftWeight;
         } else {
-            layer.strokeWeight = data.strokeWeight || 1;
+            layer.strokeWeight = (data.strokeWeight !== undefined) ? data.strokeWeight : 1;
         }
     }
 

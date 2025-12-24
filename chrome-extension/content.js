@@ -31,13 +31,32 @@ function inlineSvgStyles(svgElement) {
             'fill': 'fill',
             'stroke': 'stroke',
             'stroke-width': 'stroke-width',
+            'stroke-linecap': 'stroke-linecap',
+            'stroke-linejoin': 'stroke-linejoin',
+            'stroke-dasharray': 'stroke-dasharray',
+            'stroke-dashoffset': 'stroke-dashoffset',
+            'stroke-miterlimit': 'stroke-miterlimit',
+            'vector-effect': 'vector-effect',
             'opacity': 'opacity',
-            'display': 'display'
+            'fill-opacity': 'fill-opacity',
+            'stroke-opacity': 'stroke-opacity',
+            'stroke-dasharray': 'stroke-dasharray',
+            'stroke-dashoffset': 'stroke-dashoffset',
+            'display': 'display',
+            'visibility': 'visibility',
+            'font-family': 'font-family',
+            'font-size': 'font-size',
+            'font-weight': 'font-weight'
         };
 
         for (const [prop, attr] of Object.entries(attrs)) {
-            const val = style.getPropertyValue(prop);
-            if (val && val !== 'none' && val !== '0px' && val !== 'normal') {
+            let val = style.getPropertyValue(prop);
+            if (val && val !== 'none' && val !== 'normal') {
+                // Normalize numeric values (strip px for SVG attributes)
+                if (['stroke-width', 'stroke-miterlimit', 'stroke-dashoffset', 'font-size'].includes(prop)) {
+                    val = val.replace('px', '');
+                }
+
                 clone.setAttribute(attr, val);
 
                 // Collect url(#id) references
@@ -186,9 +205,8 @@ function isTextContainer(node) {
     for (const child of node.childNodes) {
         if (child.nodeType === Node.TEXT_NODE) continue;
         if (child.nodeType === Node.ELEMENT_NODE && INLINE_TAGS.includes(child.tagName)) {
-            // Check if inline child has background/border
-            const childStyle = window.getComputedStyle(child);
-            if (parseColor(childStyle.backgroundColor).a > 0 || (childStyle.backgroundImage && childStyle.backgroundImage !== 'none')) return false;
+            // Allow inline tags even if they have backgrounds/borders
+            // We'll lose the background in Figma but preserve the text flow
             continue;
         }
         return false;
@@ -356,7 +374,7 @@ function getStyles(element) {
         fontStyle: style.fontStyle,
         fontFamily: fontFamily,
         textAlign: style.textAlign,
-        lineHeight: parseFloat(style.lineHeight) || undefined,
+        lineHeight: (style.lineHeight === 'normal') ? (parseFloat(style.fontSize) * 1.2) : (parseFloat(style.lineHeight) || undefined),
         letterSpacing: parseFloat(style.letterSpacing) || 0,
         textIndent: parseFloat(style.textIndent) || 0,
         textTransform: style.textTransform,
@@ -486,7 +504,7 @@ function captureNode(node, depth = 0, skipNodes = new Set()) {
     if (IGNORED_TAGS.includes(node.tagName)) return null;
 
     const style = window.getComputedStyle(node);
-    if (style.display === 'none' || style.visibility === 'hidden') return null;
+    if (style.display === 'none' || style.visibility === 'hidden' || parseFloat(style.opacity) === 0) return null;
 
     const rect = node.getBoundingClientRect();
     if (rect.width < 1 && rect.height < 1 && node.tagName !== 'BODY') return null;
