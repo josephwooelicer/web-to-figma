@@ -42,6 +42,18 @@ async function safeLoadFont(fontName) {
 }
 
 async function createLayer(data, parent, parentGlobalX = 0, parentGlobalY = 0) {
+    // Helper to recursively fix SVG stroke weights (default 2 -> 1)
+    function fixSvgStrokes(node) {
+        if ('children' in node) {
+            for (const child of node.children) {
+                fixSvgStrokes(child);
+            }
+        }
+        if ('strokeWeight' in node && node.strokeWeight === 2) {
+            node.strokeWeight = 1;
+        }
+    }
+
     let layer;
 
     if (data.type === 'TEXT') {
@@ -154,6 +166,7 @@ async function createLayer(data, parent, parentGlobalX = 0, parentGlobalY = 0) {
     } else if (data.type === 'SVG') {
         try {
             layer = figma.createNodeFromSvg(data.svgContent);
+            fixSvgStrokes(layer);
         } catch (e) {
             console.error("SVG creation failed", e);
             layer = figma.createFrame();
@@ -164,6 +177,8 @@ async function createLayer(data, parent, parentGlobalX = 0, parentGlobalY = 0) {
         layer.name = "Image: " + (data.name || "IMG");
         // Placeholder for image fill - fetching image data is complex, 
         // we'll just color it gray for now or try to use figma.createImageAsync
+    } else if (data.type === 'RECTANGLE') {
+        layer = figma.createRectangle();
     } else {
         layer = figma.createFrame();
         if (data.clipsContent !== undefined) {
@@ -356,6 +371,12 @@ async function createLayer(data, parent, parentGlobalX = 0, parentGlobalY = 0) {
             } else {
                 layer.strokeWeight = (data.strokeWeight !== undefined) ? data.strokeWeight : 1;
             }
+        }
+    } else {
+        // Even if no strokes are defined (e.g. SVG import handled purely by shape), 
+        // ensure default property is set to 1 instead of Figma's potential internal default of 2-4
+        if ('strokeWeight' in layer) {
+            layer.strokeWeight = (data.strokeWeight !== undefined) ? data.strokeWeight : 1;
         }
     }
 

@@ -6,6 +6,21 @@ const INLINE_TAGS = ['SPAN', 'STRONG', 'B', 'EM', 'I', 'A', 'CODE', 'SUB', 'SUP'
  */
 function parseColor(colorString) {
     if (!colorString || colorString === 'transparent') return { r: 0, g: 0, b: 0, a: 0 };
+    if (colorString.startsWith('#')) {
+        const hex = colorString.substring(1);
+        let im;
+        if (hex.length === 3 || hex.length === 4) {
+            im = hex.split('').map(c => parseInt(c + c, 16));
+        } else {
+            im = hex.match(/.{1,2}/g).map(c => parseInt(c, 16));
+        }
+        return {
+            r: im[0] / 255,
+            g: im[1] / 255,
+            b: im[2] / 255,
+            a: im[3] !== undefined ? im[3] / 255 : 1
+        };
+    }
     const match = colorString.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?\)/);
     if (!match) return { r: 0, g: 0, b: 0, a: 1 };
     return {
@@ -918,47 +933,64 @@ function captureNode(node, depth = 0, skipNodes = new Set(), parentYAdjustment =
     // Special handling for form elements: INPUT, TEXTAREA, SELECT
     // These elements don't have text nodes for their values, so we create a virtual text layer
     if (node.tagName === 'INPUT' || node.tagName === 'TEXTAREA' || node.tagName === 'SELECT') {
-        let valueText = "";
-        let isPlaceholder = false;
-
-        if (node.tagName === 'SELECT') {
-            const selectedOption = node.options[node.selectedIndex];
-            valueText = selectedOption ? selectedOption.text : "";
-        } else {
-            valueText = node.value || "";
-            // If no value, check for placeholder
-            if (!valueText && node.placeholder) {
-                valueText = node.placeholder;
-                isPlaceholder = true;
-            }
-        }
-
-        if (valueText) {
-            let textAlignHorizontal = styles.textAlign.toUpperCase();
-            if (textAlignHorizontal === 'START') textAlignHorizontal = 'LEFT';
-            if (textAlignHorizontal === 'END') textAlignHorizontal = 'RIGHT';
-            if (textAlignHorizontal === 'JUSTIFY') textAlignHorizontal = 'JUSTIFIED';
-            if (!['LEFT', 'CENTER', 'RIGHT', 'JUSTIFIED'].includes(textAlignHorizontal)) textAlignHorizontal = 'LEFT';
-
-            // Use reduced opacity for placeholder text
-            const textOpacity = isPlaceholder ? 0.5 : styles.color.a;
+        // Special handling for COLOR inputs
+        if (node.tagName === 'INPUT' && node.type === 'color') {
+            const colorVal = node.value; // e.g. #ff0000
+            const parsedColor = parseColor(colorVal);
 
             layer.children.push({
-                name: isPlaceholder ? 'Placeholder' : 'Value',
-                type: 'TEXT',
+                name: 'Color Value',
+                type: 'RECTANGLE',
                 x: absX + xCorrection + styles.paddingLeft,
                 y: absY + yCorrection + styles.paddingTop,
                 width: finalWidth - styles.paddingLeft - styles.paddingRight,
                 height: finalHeight - styles.paddingTop - styles.paddingBottom,
-                characters: valueText,
-                fontSize: styles.fontSize,
-                fontFamily: styles.fontFamily,
-                fontWeight: styles.fontWeight,
-                textAlignHorizontal: textAlignHorizontal,
-                textAlignVertical: 'CENTER', // Generally vertically centered in standard inputs
-                lineHeight: styles.lineHeight,
-                fills: [{ type: 'SOLID', color: { r: styles.color.r, g: styles.color.g, b: styles.color.b }, opacity: textOpacity }]
+                cornerRadius: 2, // Slight radius for the swatch
+                fills: [{ type: 'SOLID', color: { r: parsedColor.r, g: parsedColor.g, b: parsedColor.b }, opacity: parsedColor.a }]
             });
+        } else {
+            let valueText = "";
+            let isPlaceholder = false;
+
+            if (node.tagName === 'SELECT') {
+                const selectedOption = node.options[node.selectedIndex];
+                valueText = selectedOption ? selectedOption.text : "";
+            } else {
+                valueText = node.value || "";
+                // If no value, check for placeholder
+                if (!valueText && node.placeholder) {
+                    valueText = node.placeholder;
+                    isPlaceholder = true;
+                }
+            }
+
+            if (valueText) {
+                let textAlignHorizontal = styles.textAlign.toUpperCase();
+                if (textAlignHorizontal === 'START') textAlignHorizontal = 'LEFT';
+                if (textAlignHorizontal === 'END') textAlignHorizontal = 'RIGHT';
+                if (textAlignHorizontal === 'JUSTIFY') textAlignHorizontal = 'JUSTIFIED';
+                if (!['LEFT', 'CENTER', 'RIGHT', 'JUSTIFIED'].includes(textAlignHorizontal)) textAlignHorizontal = 'LEFT';
+
+                // Use reduced opacity for placeholder text
+                const textOpacity = isPlaceholder ? 0.5 : styles.color.a;
+
+                layer.children.push({
+                    name: isPlaceholder ? 'Placeholder' : 'Value',
+                    type: 'TEXT',
+                    x: absX + xCorrection + styles.paddingLeft,
+                    y: absY + yCorrection + styles.paddingTop,
+                    width: finalWidth - styles.paddingLeft - styles.paddingRight,
+                    height: finalHeight - styles.paddingTop - styles.paddingBottom,
+                    characters: valueText,
+                    fontSize: styles.fontSize,
+                    fontFamily: styles.fontFamily,
+                    fontWeight: styles.fontWeight,
+                    textAlignHorizontal: textAlignHorizontal,
+                    textAlignVertical: 'CENTER', // Generally vertically centered in standard inputs
+                    lineHeight: styles.lineHeight,
+                    fills: [{ type: 'SOLID', color: { r: styles.color.r, g: styles.color.g, b: styles.color.b }, opacity: textOpacity }]
+                });
+            }
         }
     }
 
