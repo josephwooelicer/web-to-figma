@@ -227,12 +227,17 @@ function isTextContainer(node) {
 
             // Even if it's an inline tag, if it has a background, border, or is a flex/grid container,
             // we want to preserve its structure as a Frame.
+            // EXCEPTION: For standard inline text formatting like code, mark, spans, we prefer
+            // merging them into the text layer to avoid layout drift, even if we lose the background color.
             const childStyle = window.getComputedStyle(child);
-            const hasBg = (parseColor(childStyle.backgroundColor).a > 0) || (childStyle.backgroundImage && childStyle.backgroundImage !== 'none');
-            const hasBorder = parseFloat(childStyle.borderTopWidth) > 0 || parseFloat(childStyle.borderRightWidth) > 0 || parseFloat(childStyle.borderBottomWidth) > 0 || parseFloat(childStyle.borderLeftWidth) > 0;
             const isFlexGrid = childStyle.display === 'flex' || childStyle.display === 'inline-flex' || childStyle.display === 'grid' || childStyle.display === 'inline-grid';
 
-            if (hasBg || hasBorder || isFlexGrid) return false;
+            // If it's a layout container, we must preserve it as a frame
+            if (isFlexGrid) return false;
+
+            // Otherwise, for standard inline elements (span, code, etc), accept them into the text node
+            // This means visual background/border properties on these specific children will be lost in Figma
+            // but the text flow will be correct.
             continue;
         }
         return false;
@@ -284,6 +289,52 @@ function getEffectiveTextDecoration(element) {
 }
 
 /**
+ * Attempts to extract LaTeX/MathML source from a node if it's a math container.
+ */
+function getMathContent(node) {
+    if (!node || node.nodeType !== Node.ELEMENT_NODE) return null;
+
+    // MathJax Container (v3)
+    if (node.tagName === 'MJX-CONTAINER') {
+        // Try accessing the assistive MML which often contains the TeX annotation
+        const assistive = node.querySelector('.mjx-assistive-mml');
+        if (assistive) {
+            const annotation = assistive.querySelector('annotation[encoding="application/x-tex"]');
+            if (annotation) return annotation.textContent.trim();
+            // Fallback to aria-label if it looks like TeX
+            const aria = node.getAttribute('aria-label');
+            if (aria) return aria;
+        }
+        // If we can't find clear TeX, checking for script tags might be needed but usually mjx-container has accessible parts
+    }
+
+    // KaTeX Container
+    if (node.classList.contains('katex')) {
+        // KaTeX usually has a MathML block with annotation
+        const mathML = node.querySelector('annotation[encoding="application/x-tex"]');
+        if (mathML) return mathML.textContent.trim();
+
+        // Sometimes the original TeX is in a separate script or just not easily accessible in the DOM structure 
+        // without looking at the 'katex-mathml' block
+        const mml = node.querySelector('.katex-mathml');
+        if (mml) {
+            const anno = mml.querySelector('annotation');
+            if (anno) return anno.textContent.trim();
+            return mml.textContent.trim(); // Fallback
+        }
+    }
+
+    // Generic MathML
+    if (node.tagName === 'MATH') {
+        const annotation = node.querySelector('annotation[encoding="application/x-tex"]');
+        if (annotation) return annotation.textContent.trim();
+        // Fallback: try to return purely text content if it's short, might be messy
+    }
+
+    return null;
+}
+
+/**
  * Builds styling ranges and full text for a rich text container
  */
 function getRichTextData(element) {
@@ -293,10 +344,18 @@ function getRichTextData(element) {
     function walk(node) {
         if (node.nodeType === Node.TEXT_NODE) {
             let content = node.textContent;
-            // Collapse whitespace within this chunk
-            content = collapseWhitespace(content);
+
+            const parent = node.parentElement;
+            const parentStyle = window.getComputedStyle(parent);
+            const whiteSpace = parentStyle.whiteSpace;
+            const preserveWhitespace = ['pre', 'pre-wrap', 'pre-line', 'break-spaces'].includes(whiteSpace);
+
+            if (!preserveWhitespace) {
+                // Collapse whitespace within this chunk
+                content = collapseWhitespace(content);
+            }
+
             if (content.length > 0) {
-                const parent = node.parentElement;
                 const styles = getStyles(parent);
                 const range = {
                     start: text.length,
@@ -334,16 +393,22 @@ function getRichTextData(element) {
         }
     }
 
+    const containerStyle = window.getComputedStyle(element);
+    const preserveContainerWhitespace = ['pre', 'pre-wrap', 'pre-line', 'break-spaces'].includes(containerStyle.whiteSpace);
+
     walk(element);
-    // Trim and adjust ranges
-    const originalLength = text.length;
-    text = text.trim();
-    const diff = originalLength - text.length;
-    if (diff > 0) {
-        const leadingSpaces = originalLength - text.replace(/^\s+/, '').length;
-        for (const range of ranges) {
-            range.start = Math.max(0, range.start - leadingSpaces);
-            range.end = Math.max(0, range.end - leadingSpaces);
+
+    // Trim and adjust ranges ONLY if whitespace is not preserved
+    if (!preserveContainerWhitespace) {
+        const originalLength = text.length;
+        text = text.trim();
+        const diff = originalLength - text.length;
+        if (diff > 0) {
+            const leadingSpaces = originalLength - text.replace(/^\s+/, '').length;
+            for (const range of ranges) {
+                range.start = Math.max(0, range.start - leadingSpaces);
+                range.end = Math.max(0, range.end - leadingSpaces);
+            }
         }
     }
 
@@ -390,7 +455,17 @@ function getStyles(element) {
     const color = parseColor(style.color);
 
     // Clean up font family: take first one, remove quotes
-    let fontFamily = style.fontFamily.split(',')[0].replace(/['"]/g, '').trim();
+    // Clean up font family: analyze stack for monospace
+    let fontFamily = style.fontFamily;
+    const isMonospace = /\b(monospace|mono|consolas|courier|inconsolata|menlo|monaco|source code pro)\b/i.test(fontFamily);
+
+    // Figma fallback for code blocks
+    if (isMonospace) {
+        fontFamily = 'Roboto Mono';
+    } else {
+        // Take first one, remove quotes
+        fontFamily = fontFamily.split(',')[0].replace(/['"]/g, '').trim();
+    }
 
     return {
         backgroundColor: bgColor,
@@ -542,6 +617,23 @@ function captureNode(node, depth = 0, skipNodes = new Set(), parentYAdjustment =
     if (node.nodeType !== Node.ELEMENT_NODE) return null;
     if (IGNORED_TAGS.includes(node.tagName)) return null;
 
+    // Filter hidden/assistive elements (MathJax, KaTeX)
+    if (node.classList && (
+        node.classList.contains('mjx-assistive-mml') ||
+        node.classList.contains('katex-html') ||
+        node.getAttribute('aria-hidden') === 'true'
+    )) {
+        // Double check if it's truly hidden (sometimes aria-hidden is used for decorative interactions but visuals are there)
+        // For MathJax assistive MML, it is definitely hidden clip-path
+        if (node.classList.contains('mjx-assistive-mml')) return null;
+
+        // Check for clip rect 1px
+        const style = window.getComputedStyle(node);
+        if (style.clip === 'rect(1px, 1px, 1px, 1px)' || style.clipPath?.includes('polygon')) {
+            return null;
+        }
+    }
+
     const style = window.getComputedStyle(node);
     if (style.display === 'none' || style.visibility === 'hidden' || parseFloat(style.opacity) === 0) return null;
 
@@ -570,6 +662,34 @@ function captureNode(node, depth = 0, skipNodes = new Set(), parentYAdjustment =
     }
 
     const styles = getStyles(node);
+
+    // --- MATH CAPTURE ---
+    // Check if this is a math container and extract source if available
+    const mathContent = getMathContent(node);
+    if (mathContent) {
+        // Create a single text layer for the math formula
+        return {
+            name: 'Math (LaTeX)',
+            type: 'TEXT',
+            x: absX + xCorrection,
+            y: absY + yCorrection,
+            width: finalWidth,
+            height: finalHeight,
+            characters: mathContent,
+            fontSize: styles.fontSize,
+            fontFamily: 'Roboto Mono', // Force monospace for code/math source
+            fontWeight: 'regular',
+            textAlignHorizontal: 'LEFT',
+            textAlignVertical: 'CENTER',
+            lineHeight: styles.lineHeight,
+            fills: [{ type: 'SOLID', color: { r: styles.color.r, g: styles.color.g, b: styles.color.b }, opacity: styles.color.a }],
+            _zIndex: styles.zIndex,
+            _position: styles.position,
+            _float: styles.float
+        };
+    }
+    // --------------------
+
     const type = node.tagName === 'IMG' ? 'IMAGE' : (node.tagName === 'svg' || node.tagName === 'SVG' ? 'SVG' : 'FRAME');
 
     let absX = rect.left + window.scrollX;
