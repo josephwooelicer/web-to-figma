@@ -32,6 +32,13 @@ function parseColor(colorString) {
 }
 
 /**
+ * Safe getComputedStyle that handles iframes
+ */
+function getSafeComputedStyle(element) {
+    return (element.ownerDocument && element.ownerDocument.defaultView ? element.ownerDocument.defaultView : window).getComputedStyle(element);
+}
+
+/**
  * Inlines computed styles and resolves external references (gradients, etc.) into SVG string
  */
 function inlineSvgStyles(svgElement) {
@@ -223,7 +230,7 @@ function isTextContainer(node) {
     if (node.nodeType !== Node.ELEMENT_NODE) return false;
     if (node.childNodes.length === 0) return false;
 
-    const style = window.getComputedStyle(node);
+    const style = getSafeComputedStyle(node);
     const hasVisibleBackground = (parseColor(style.backgroundColor).a > 0) || (style.backgroundImage && style.backgroundImage !== 'none');
     const hasVisibleBorder = parseFloat(style.borderTopWidth) > 0 || parseFloat(style.borderRightWidth) > 0 || parseFloat(style.borderBottomWidth) > 0 || parseFloat(style.borderLeftWidth) > 0;
 
@@ -244,7 +251,7 @@ function isTextContainer(node) {
             // we want to preserve its structure as a Frame.
             // EXCEPTION: For standard inline text formatting like code, mark, spans, we prefer
             // merging them into the text layer to avoid layout drift, even if we lose the background color.
-            const childStyle = window.getComputedStyle(child);
+            const childStyle = getSafeComputedStyle(child);
             const isFlexGrid = childStyle.display === 'flex' || childStyle.display === 'inline-flex' || childStyle.display === 'grid' || childStyle.display === 'inline-grid';
 
             // If it's a layout container, we must preserve it as a frame
@@ -264,7 +271,7 @@ function isTextContainer(node) {
  * Computes the marker (bullet/number) for a list item
  */
 function getListItemMarkerType(element) {
-    const style = window.getComputedStyle(element);
+    const style = getSafeComputedStyle(element);
     const listStyleType = style.listStyleType;
 
     if (listStyleType === 'none') return null;
@@ -287,7 +294,7 @@ function getEffectiveTextDecoration(element) {
     let strikethrough = false;
 
     while (current && current !== document.body) {
-        const style = window.getComputedStyle(current);
+        const style = getSafeComputedStyle(current);
         const line = style.textDecorationLine;
         if (line.includes('underline')) underline = true;
         if (line.includes('line-through')) strikethrough = true;
@@ -361,7 +368,7 @@ function getRichTextData(element) {
             let content = node.textContent;
 
             const parent = node.parentElement;
-            const parentStyle = window.getComputedStyle(parent);
+            const parentStyle = getSafeComputedStyle(parent);
             const whiteSpace = parentStyle.whiteSpace;
             const preserveWhitespace = ['pre', 'pre-wrap', 'pre-line', 'break-spaces'].includes(whiteSpace);
 
@@ -395,7 +402,7 @@ function getRichTextData(element) {
                 text += content;
             }
         } else if (node.nodeType === Node.ELEMENT_NODE) {
-            const style = window.getComputedStyle(node);
+            const style = getSafeComputedStyle(node);
             if (style.display === 'none') return;
 
             if (node.tagName === 'BR') {
@@ -408,7 +415,7 @@ function getRichTextData(element) {
         }
     }
 
-    const containerStyle = window.getComputedStyle(element);
+    const containerStyle = getSafeComputedStyle(element);
     const preserveContainerWhitespace = ['pre', 'pre-wrap', 'pre-line', 'break-spaces'].includes(containerStyle.whiteSpace);
 
     walk(element);
@@ -465,7 +472,7 @@ function normalizeFontWeight(weight) {
  * Capture basic styles for a node
  */
 function getStyles(element) {
-    const style = window.getComputedStyle(element);
+    const style = getSafeComputedStyle(element);
     const bgColor = parseColor(style.backgroundColor);
     const color = parseColor(style.color);
 
@@ -548,7 +555,7 @@ function getStyles(element) {
  * @param {Set<Node>} skipNodes Nodes to skip during traversal (already captured in other groups)
  * @param {number} parentYAdjustment Y offset adjustment from parent fixed bottom positioning
  */
-function captureNode(node, depth = 0, skipNodes = new Set(), parentYAdjustment = 0) {
+function captureNode(node, depth = 0, skipNodes = new Set(), parentYAdjustment = 0, documentOffset = { x: 0, y: 0 }) {
     if (depth > 50) return null;
     if (skipNodes.has(node)) return null;
 
@@ -559,7 +566,7 @@ function captureNode(node, depth = 0, skipNodes = new Set(), parentYAdjustment =
         const parent = node.parentElement;
         if (!parent) return null;
 
-        const parentStyle = window.getComputedStyle(parent);
+        const parentStyle = getSafeComputedStyle(parent);
         if (parentStyle.display === 'none' || parentStyle.visibility === 'hidden' || parseFloat(parentStyle.opacity) === 0) return null;
 
         const range = document.createRange();
@@ -602,11 +609,12 @@ function captureNode(node, depth = 0, skipNodes = new Set(), parentYAdjustment =
         const linkParent = parent.closest('a');
         const link = (linkParent && linkParent.href) ? { type: 'URL', value: linkParent.href } : undefined;
 
+        const win = node.ownerDocument.defaultView || window;
         return {
             name: 'Text',
             type: 'TEXT',
-            x: left + window.scrollX,
-            y: top + window.scrollY,
+            x: left + win.scrollX + documentOffset.x,
+            y: top + win.scrollY + documentOffset.y,
             width: right - left,
             height: bottom - top,
             characters: textContent,
@@ -632,6 +640,10 @@ function captureNode(node, depth = 0, skipNodes = new Set(), parentYAdjustment =
     }
 
     if (node.nodeType !== Node.ELEMENT_NODE) return null;
+
+    // Define win for element nodes
+    const win = node.ownerDocument.defaultView || window;
+
     if (IGNORED_TAGS.includes(node.tagName)) return null;
 
     // Filter hidden/assistive elements (MathJax, KaTeX)
@@ -645,13 +657,13 @@ function captureNode(node, depth = 0, skipNodes = new Set(), parentYAdjustment =
         if (node.classList.contains('mjx-assistive-mml')) return null;
 
         // Check for clip rect 1px
-        const style = window.getComputedStyle(node);
+        const style = win.getComputedStyle(node);
         if (style.clip === 'rect(1px, 1px, 1px, 1px)' || style.clipPath?.includes('polygon')) {
             return null;
         }
     }
 
-    const style = window.getComputedStyle(node);
+    const style = getSafeComputedStyle(node);
     if (style.display === 'none' || style.visibility === 'hidden' || parseFloat(style.opacity) === 0) return null;
 
     const rect = node.getBoundingClientRect();
@@ -679,6 +691,9 @@ function captureNode(node, depth = 0, skipNodes = new Set(), parentYAdjustment =
     }
 
     const styles = getStyles(node);
+
+    let absX = rect.left + win.scrollX + documentOffset.x;
+    let absY = rect.top + win.scrollY + documentOffset.y;
 
     // --- MATH CAPTURE ---
     // Check if this is a math container and extract source if available
@@ -709,8 +724,7 @@ function captureNode(node, depth = 0, skipNodes = new Set(), parentYAdjustment =
 
     const type = node.tagName === 'IMG' ? 'IMAGE' : (node.tagName === 'svg' || node.tagName === 'SVG' ? 'SVG' : 'FRAME');
 
-    let absX = rect.left + window.scrollX;
-    let absY = rect.top + window.scrollY;
+
 
     // Track Y adjustment for this element to pass to children
     let currentYAdjustment = parentYAdjustment;
@@ -721,10 +735,10 @@ function captureNode(node, depth = 0, skipNodes = new Set(), parentYAdjustment =
         if (styles.top !== 'auto' && styles.top !== '') {
             // Use viewport position, not scrolled position
             const topValue = parseFloat(styles.top) || 0;
-            absY = rect.top; // Use viewport position directly
+            absY = rect.top + documentOffset.y; // Use viewport position + doc offset
             // Calculate adjustment needed for children: they should also use viewport coords
             // Children will initially calculate as rect.top + scrollY, so we need to subtract scrollY
-            currentYAdjustment = -window.scrollY;
+            currentYAdjustment = -win.scrollY;
         }
         // Fixed elements with bottom positioning should be at the page bottom
         else if (styles.bottom !== 'auto' && styles.bottom !== '') {
@@ -788,7 +802,7 @@ function captureNode(node, depth = 0, skipNodes = new Set(), parentYAdjustment =
         // Look up parent table to get column gap
         const parentTable = node.closest('table');
         if (parentTable) {
-            const tableStyle = window.getComputedStyle(parentTable);
+            const tableStyle = getSafeComputedStyle(parentTable);
             if (tableStyle.borderCollapse === 'collapse') {
                 layer.tableColGap = 0;
             } else {
@@ -803,7 +817,7 @@ function captureNode(node, depth = 0, skipNodes = new Set(), parentYAdjustment =
         layer.isTableGroup = true;
         const parentTable = node.closest('table');
         if (parentTable) {
-            const tableStyle = window.getComputedStyle(parentTable);
+            const tableStyle = getSafeComputedStyle(parentTable);
             if (tableStyle.borderCollapse === 'collapse') {
                 layer.tableRowGap = 0;
             } else {
@@ -884,6 +898,27 @@ function captureNode(node, depth = 0, skipNodes = new Set(), parentYAdjustment =
         layer.svgContent = inlineSvgStyles(node);
         // Don't recurse into SVG children, Figma handles the whole string
         return layer;
+    }
+
+    if (node.tagName === 'IFRAME') {
+        try {
+            const doc = node.contentDocument;
+            if (doc && doc.body) {
+                const childWin = doc.defaultView || window;
+                const bLeft = styles.borderLeftWidth || 0;
+                const bTop = styles.borderTopWidth || 0;
+
+                const newDocOffset = {
+                    x: absX + bLeft - childWin.scrollX,
+                    y: absY + bTop - childWin.scrollY
+                };
+
+                const bodyLayer = captureNode(doc.body, depth + 1, skipNodes, 0, newDocOffset);
+                if (bodyLayer) {
+                    layer.children.push(bodyLayer);
+                }
+            }
+        } catch (e) { }
     }
 
     if (node.tagName === 'IMG') {
@@ -997,7 +1032,7 @@ function captureNode(node, depth = 0, skipNodes = new Set(), parentYAdjustment =
     let childCount = 0;
     for (const child of node.childNodes) {
         if (childCount > 500) break;
-        const childLayer = captureNode(child, depth + 1, skipNodes, currentYAdjustment);
+        const childLayer = captureNode(child, depth + 1, skipNodes, currentYAdjustment, documentOffset);
         if (childLayer) {
             layer.children.push(childLayer);
             childCount++;
@@ -1070,7 +1105,7 @@ function findRootPositionedElements(rootNode, positions) {
     const roots = [];
     const walker = document.createTreeWalker(rootNode, NodeFilter.SHOW_ELEMENT, {
         acceptNode(node) {
-            const style = window.getComputedStyle(node);
+            const style = getSafeComputedStyle(node);
             if (positions.includes(style.position)) {
                 return NodeFilter.FILTER_ACCEPT;
             }
@@ -1084,7 +1119,7 @@ function findRootPositionedElements(rootNode, positions) {
         let hasAncestorInRoots = false;
         let parent = node.parentElement;
         while (parent && parent !== rootNode) {
-            const parentStyle = window.getComputedStyle(parent);
+            const parentStyle = getSafeComputedStyle(parent);
             if (positions.includes(parentStyle.position)) {
                 hasAncestorInRoots = true;
                 break;
