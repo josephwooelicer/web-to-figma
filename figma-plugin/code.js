@@ -173,42 +173,58 @@ async function createLayer(data, parent, parentGlobalX = 0, parentGlobalY = 0) {
 
     layer.name = data.name || "Layer";
 
-    // Auto Layout Support (Flexbox)
-    if (data.type === 'FRAME' && (data.display === 'flex' || data.display === 'inline-flex')) {
-        layer.layoutMode = data.flexDirection === 'column' ? 'VERTICAL' : 'HORIZONTAL';
-        let spacing = data.flexDirection === 'column' ? (data.rowGap || 0) : (data.columnGap || 0);
+    // Auto Layout Support (Flexbox & Tables)
+    const isFlex = data.display === 'flex' || data.display === 'inline-flex';
+    const isTable = data.isTable;
+    const isTableGroup = data.isTableGroup;
+    const isTableRow = data.isTableRow;
 
-        // If gap is 0, check if children have margins (common in space-x/y patterns)
-        if (spacing === 0 && data.children && data.children.length > 1) {
-            // Check second child for margin (skip first as it often has 0 margin in space-x)
-            const secondChild = data.children[1];
-            if (data.flexDirection === 'column') {
-                spacing = Math.max(secondChild.marginTop || 0, 0);
-            } else {
-                spacing = Math.max(secondChild.marginLeft || 0, 0);
+    if (data.type === 'FRAME' && (isFlex || isTable || isTableGroup || isTableRow)) {
+        if (isTable || isTableGroup) {
+            layer.layoutMode = 'VERTICAL';
+            layer.itemSpacing = data.tableRowGap || 0;
+        } else if (isTableRow) {
+            layer.layoutMode = 'HORIZONTAL';
+            layer.itemSpacing = data.tableColGap || 0;
+        } else {
+            // Standard Flexbox
+            layer.layoutMode = data.flexDirection === 'column' ? 'VERTICAL' : 'HORIZONTAL';
+            let spacing = data.flexDirection === 'column' ? (data.rowGap || 0) : (data.columnGap || 0);
+
+            // If gap is 0, check if children have margins (common in space-x/y patterns)
+            if (spacing === 0 && data.children && data.children.length > 1) {
+                // Check second child for margin (skip first as it often has 0 margin in space-x)
+                const secondChild = data.children[1];
+                if (data.flexDirection === 'column') {
+                    spacing = Math.max(secondChild.marginTop || 0, 0);
+                } else {
+                    spacing = Math.max(secondChild.marginLeft || 0, 0);
+                }
             }
+            layer.itemSpacing = spacing;
         }
 
-        layer.itemSpacing = spacing;
+        // Alignment (Flexbox only for now, Tables usually use internal cell alignment or legacy align props)
+        // For tables, we mostly rely on the fact that rows fill the table width and cells fill row height
+        if (isFlex) {
+            const items = data.alignItems;
+            const content = data.justifyContent;
 
-        // Alignment
-        const items = data.alignItems;
-        const content = data.justifyContent;
+            if (layer.layoutMode === 'HORIZONTAL') {
+                if (content === 'center') layer.primaryAxisAlignItems = 'CENTER';
+                else if (content === 'flex-end' || content === 'end') layer.primaryAxisAlignItems = 'MAX';
+                else if (content === 'space-between') layer.primaryAxisAlignItems = 'SPACE_BETWEEN';
 
-        if (layer.layoutMode === 'HORIZONTAL') {
-            if (content === 'center') layer.primaryAxisAlignItems = 'CENTER';
-            else if (content === 'flex-end' || content === 'end') layer.primaryAxisAlignItems = 'MAX';
-            else if (content === 'space-between') layer.primaryAxisAlignItems = 'SPACE_BETWEEN';
+                if (items === 'center') layer.counterAxisAlignItems = 'CENTER';
+                else if (items === 'flex-end' || items === 'end') layer.counterAxisAlignItems = 'MAX';
+            } else {
+                if (content === 'center') layer.primaryAxisAlignItems = 'CENTER';
+                else if (content === 'flex-end' || content === 'end') layer.primaryAxisAlignItems = 'MAX';
+                else if (content === 'space-between') layer.primaryAxisAlignItems = 'SPACE_BETWEEN';
 
-            if (items === 'center') layer.counterAxisAlignItems = 'CENTER';
-            else if (items === 'flex-end' || items === 'end') layer.counterAxisAlignItems = 'MAX';
-        } else {
-            if (content === 'center') layer.primaryAxisAlignItems = 'CENTER';
-            else if (content === 'flex-end' || content === 'end') layer.primaryAxisAlignItems = 'MAX';
-            else if (content === 'space-between') layer.primaryAxisAlignItems = 'SPACE_BETWEEN';
-
-            if (items === 'center') layer.counterAxisAlignItems = 'CENTER';
-            else if (items === 'flex-end' || items === 'end') layer.counterAxisAlignItems = 'MAX';
+                if (items === 'center') layer.counterAxisAlignItems = 'CENTER';
+                else if (items === 'flex-end' || items === 'end') layer.counterAxisAlignItems = 'MAX';
+            }
         }
 
         layer.paddingTop = data.paddingTop || 0;

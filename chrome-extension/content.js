@@ -521,6 +521,8 @@ function getStyles(element) {
         left: style.left,
         zIndex: style.zIndex,
         float: style.float,
+        borderCollapse: style.borderCollapse,
+        borderSpacing: style.borderSpacing // Returns "Xpx Ypx" or "Xpx"
     };
 }
 
@@ -746,6 +748,57 @@ function captureNode(node, depth = 0, skipNodes = new Set(), parentYAdjustment =
         _position: styles.position,
         _float: styles.float
     };
+
+    // Capture Table Spacing for AutoLayout
+    if (styles.display === 'table') {
+        layer.isTable = true;
+        // Parse border-spacing "horizontal vertical"
+        const parts = styles.borderSpacing.split(' ').map(p => parseFloat(p) || 0);
+        const hSpacing = parts[0];
+        const vSpacing = parts[1] !== undefined ? parts[1] : hSpacing;
+
+        // If collapsed, spacing is 0
+        if (styles.borderCollapse === 'collapse') {
+            layer.tableRowGap = 0;
+            layer.tableColGap = 0;
+        } else {
+            layer.tableRowGap = vSpacing;
+            layer.tableColGap = hSpacing;
+        }
+    }
+
+    // For table rows, we need to know the horizontal spacing from the parent table
+    if (styles.display === 'table-row') {
+        layer.isTableRow = true;
+        // Look up parent table to get column gap
+        const parentTable = node.closest('table');
+        if (parentTable) {
+            const tableStyle = window.getComputedStyle(parentTable);
+            if (tableStyle.borderCollapse === 'collapse') {
+                layer.tableColGap = 0;
+            } else {
+                const parts = tableStyle.borderSpacing.split(' ').map(p => parseFloat(p) || 0);
+                layer.tableColGap = parts[0];
+            }
+        }
+    }
+
+    // Capture Table Groups (tbody, thead, tfoot)
+    if (['table-row-group', 'table-header-group', 'table-footer-group'].includes(styles.display)) {
+        layer.isTableGroup = true;
+        const parentTable = node.closest('table');
+        if (parentTable) {
+            const tableStyle = window.getComputedStyle(parentTable);
+            if (tableStyle.borderCollapse === 'collapse') {
+                layer.tableRowGap = 0;
+            } else {
+                const parts = tableStyle.borderSpacing.split(' ').map(p => parseFloat(p) || 0);
+                const hSpacing = parts[0];
+                const vSpacing = parts[1] !== undefined ? parts[1] : hSpacing;
+                layer.tableRowGap = vSpacing;
+            }
+        }
+    }
 
     // RICH TEXT SUPPORT: If this is a text container, capture its contents as a single layer
     if (isTextContainer(node) && (node.childNodes.length > 0)) {
