@@ -270,21 +270,76 @@ async function createLayer(data, parent, parentGlobalX = 0, parentGlobalY = 0) {
 
     // Strokes
     if (data.strokes && data.strokes.length > 0) {
-        layer.strokes = data.strokes.map(s => ({
-            type: s.type,
-            color: s.color,
-            opacity: s.opacity !== undefined ? s.opacity : 1
-        }));
+        // Detect Circle with Unequal Borders (e.g. Spinner)
+        const isCircle = (data.type === 'FRAME' || data.type === 'ELLIPSE') &&
+            Math.abs(data.width - data.height) < 2 &&
+            (data.cornerRadius >= (data.width / 2 - 2) || (data.topLeftRadius >= (data.width / 2 - 2)));
 
-        layer.strokeAlign = 'INSIDE';
+        const t = data.strokeTopWeight || 0;
+        const r = data.strokeRightWeight || 0;
+        const b = data.strokeBottomWeight || 0;
+        const l = data.strokeLeftWeight || 0;
+        const hasUnequalBorders = (t !== r || r !== b || b !== l || l !== t);
 
-        if (data.strokeTopWeight !== undefined && (data.strokeTopWeight > 0 || data.strokeRightWeight > 0 || data.strokeBottomWeight > 0 || data.strokeLeftWeight > 0)) {
-            layer.strokeTopWeight = data.strokeTopWeight;
-            layer.strokeRightWeight = data.strokeRightWeight;
-            layer.strokeBottomWeight = data.strokeBottomWeight;
-            layer.strokeLeftWeight = data.strokeLeftWeight;
+        if (isCircle && hasUnequalBorders) {
+            // Render as Donut Arcs (simulating CSS partial borders on circles)
+            // We use the first stroke color (limitation: assumes uniform color or takes first)
+            const strokeColor = data.strokes[0].color;
+            const opacity = data.strokes[0].opacity !== undefined ? data.strokes[0].opacity : 1;
+
+            const sectors = [
+                { w: t, start: -135, end: -45, name: 'Border Top' },    // Top
+                { w: r, start: -45, end: 45, name: 'Border Right' },    // Right
+                { w: b, start: 45, end: 135, name: 'Border Bottom' },   // Bottom
+                { w: l, start: 135, end: 225, name: 'Border Left' }     // Left
+            ];
+
+            const rad = d => d * Math.PI / 180;
+            const radius = data.width / 2;
+
+            for (const s of sectors) {
+                if (s.w > 0) {
+                    const arc = figma.createEllipse();
+                    arc.name = s.name;
+                    arc.resize(data.width, data.height);
+                    arc.x = 0; arc.y = 0;
+
+                    // Donut Fill Logic
+                    arc.fills = [{ type: 'SOLID', color: strokeColor, opacity }];
+                    arc.strokes = [];
+
+                    const innerR = (radius - s.w) / radius;
+                    arc.arcData = {
+                        startingAngle: rad(s.start),
+                        endingAngle: rad(s.end),
+                        innerRadius: Math.max(0, innerR)
+                    };
+
+                    layer.appendChild(arc);
+                }
+            }
+
+            // Clear frame strokes since we handle them with children
+            layer.strokes = [];
+
         } else {
-            layer.strokeWeight = (data.strokeWeight !== undefined) ? data.strokeWeight : 1;
+            // Standard Frame Strokes
+            layer.strokes = data.strokes.map(s => ({
+                type: s.type,
+                color: s.color,
+                opacity: s.opacity !== undefined ? s.opacity : 1
+            }));
+
+            layer.strokeAlign = 'INSIDE';
+
+            if (data.strokeTopWeight !== undefined && (data.strokeTopWeight > 0 || data.strokeRightWeight > 0 || data.strokeBottomWeight > 0 || data.strokeLeftWeight > 0)) {
+                layer.strokeTopWeight = data.strokeTopWeight;
+                layer.strokeRightWeight = data.strokeRightWeight;
+                layer.strokeBottomWeight = data.strokeBottomWeight;
+                layer.strokeLeftWeight = data.strokeLeftWeight;
+            } else {
+                layer.strokeWeight = (data.strokeWeight !== undefined) ? data.strokeWeight : 1;
+            }
         }
     }
 

@@ -548,6 +548,27 @@ function captureNode(node, depth = 0, skipNodes = new Set(), parentYAdjustment =
     const rect = node.getBoundingClientRect();
     if (rect.width < 1 && rect.height < 1 && node.tagName !== 'BODY') return null;
 
+    let finalWidth = rect.width;
+    let finalHeight = rect.height;
+    let xCorrection = 0;
+    let yCorrection = 0;
+
+    // Use offset dimensions ONLY if there's a significant mismatch (indicating rotation)
+    // Otherwise rely on getBoundingClientRect for sub-pixel precision (fixes text wrapping)
+    if (node instanceof HTMLElement) {
+        const widthDiff = Math.abs(rect.width - node.offsetWidth);
+        const heightDiff = Math.abs(rect.height - node.offsetHeight);
+
+        // Threshold of 2px to ignore sub-pixel rounding differences but catch geometric transforms
+        if (widthDiff > 2 || heightDiff > 2) {
+            finalWidth = node.offsetWidth;
+            finalHeight = node.offsetHeight;
+            // Correction to align the center of the un-rotated box with the center of the bounding, rotated box
+            xCorrection = (rect.width - finalWidth) / 2;
+            yCorrection = (rect.height - finalHeight) / 2;
+        }
+    }
+
     const styles = getStyles(node);
     const type = node.tagName === 'IMG' ? 'IMAGE' : (node.tagName === 'svg' || node.tagName === 'SVG' ? 'SVG' : 'FRAME');
 
@@ -573,8 +594,8 @@ function captureNode(node, depth = 0, skipNodes = new Set(), parentYAdjustment =
             const bottomValue = parseFloat(styles.bottom) || 0;
             const pageHeight = document.documentElement.scrollHeight;
             const originalY = absY;
-            // Position from the bottom of the page
-            absY = pageHeight - rect.height - bottomValue;
+            // Position from the bottom of the page (use finalHeight for layout accuracy)
+            absY = pageHeight - finalHeight - bottomValue;
             // Calculate the adjustment made
             currentYAdjustment = absY - originalY;
         }
@@ -586,10 +607,10 @@ function captureNode(node, depth = 0, skipNodes = new Set(), parentYAdjustment =
     const layer = {
         name: (node.id ? `#${node.id}` : '') || node.tagName,
         type: type,
-        x: absX,
-        y: absY,
-        width: rect.width,
-        height: rect.height,
+        x: absX + xCorrection,
+        y: absY + yCorrection,
+        width: finalWidth,
+        height: finalHeight,
         cornerRadius: styles.borderRadius,
         topLeftRadius: styles.topLeftRadius,
         topRightRadius: styles.topRightRadius,
@@ -626,10 +647,10 @@ function captureNode(node, depth = 0, skipNodes = new Set(), parentYAdjustment =
             layer.children.push({
                 name: 'Rich Text',
                 type: 'TEXT',
-                x: absX,
-                y: absY,
-                width: rect.width,
-                height: rect.height,
+                x: absX + xCorrection, // Use corrected position
+                y: absY + yCorrection,
+                width: finalWidth,     // Use un-rotated size
+                height: finalHeight,
                 characters: richText.text,
                 fontSize: styles.fontSize,
                 fontFamily: styles.fontFamily,
@@ -695,10 +716,10 @@ function captureNode(node, depth = 0, skipNodes = new Set(), parentYAdjustment =
     }
 
     const borderWeights = {
-        top: styles.borderTopWidth,
-        right: styles.borderRightWidth,
-        bottom: styles.borderBottomWidth,
-        left: styles.borderLeftWidth
+        top: styles.borderTopColor.a > 0 ? styles.borderTopWidth : 0,
+        right: styles.borderRightColor.a > 0 ? styles.borderRightWidth : 0,
+        bottom: styles.borderBottomColor.a > 0 ? styles.borderBottomWidth : 0,
+        left: styles.borderLeftColor.a > 0 ? styles.borderLeftWidth : 0
     };
 
     if (borderWeights.top > 0 || borderWeights.right > 0 || borderWeights.bottom > 0 || borderWeights.left > 0) {
@@ -752,10 +773,10 @@ function captureNode(node, depth = 0, skipNodes = new Set(), parentYAdjustment =
             layer.children.push({
                 name: isPlaceholder ? 'Placeholder' : 'Value',
                 type: 'TEXT',
-                x: absX + styles.paddingLeft,
-                y: absY + styles.paddingTop,
-                width: rect.width - styles.paddingLeft - styles.paddingRight,
-                height: rect.height - styles.paddingTop - styles.paddingBottom,
+                x: absX + xCorrection + styles.paddingLeft,
+                y: absY + yCorrection + styles.paddingTop,
+                width: finalWidth - styles.paddingLeft - styles.paddingRight,
+                height: finalHeight - styles.paddingTop - styles.paddingBottom,
                 characters: valueText,
                 fontSize: styles.fontSize,
                 fontFamily: styles.fontFamily,
